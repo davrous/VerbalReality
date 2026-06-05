@@ -4,6 +4,12 @@ The agent turns natural-language requests into Babylon.js JavaScript snippets th
 operate on an existing `scene` (and `engine`) in the browser. The generated code is
 cumulative: new snippets can reference meshes created in previous turns by name.
 
+Beyond writing code, the agent can also browse a library of ready-made GLB models:
+  * `list_available_models` searches the Microsoft 3D-model service and returns model
+    thumbnails + GLB links, which the web client renders as a gallery in the chat.
+  * `download_model` returns the Babylon.js snippet that loads a chosen model into the
+    live scene.
+
 Two modes, controlled by the ENABLE_VALIDATION environment variable:
   * ENABLE_VALIDATION=true  -> the agent is given a `validate_babylon_code` tool backed
                                by a Node.js Babylon NullEngine service. The agent must
@@ -27,6 +33,7 @@ Run modes:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from typing import Annotated
@@ -55,6 +62,15 @@ VALIDATOR_URL = os.environ.get("VALIDATOR_URL", "http://localhost:8087/validate"
 
 # Port the Responses API server listens on (8087 is taken by the Node validator).
 SERVER_PORT = int(os.environ.get("PORT", "8088"))
+
+# Microsoft Office / PowerPoint 3D-model media service. Same public endpoint the
+# PowerPoint "3D Models" picker uses; returns thumbnail images + GLB download links.
+MODEL_SEARCH_URL = os.environ.get(
+    "MODEL_SEARCH_URL",
+    "https://hubble.officeapps.live.com/mediasvc/api/media/search?v=1&lang=en-us",
+)
+# How many models to return per search (matches the reference JARVIB experience).
+MODEL_SEARCH_PAGE_SIZE = int(os.environ.get("MODEL_SEARCH_PAGE_SIZE", "5"))
 
 
 @tool(approval_mode="never_require")
@@ -90,6 +106,115 @@ async def validate_babylon_code(
     return f"ERROR: {error}"
 
 
+@tool(approval_mode="never_require")
+async def list_available_models(
+    query: Annotated[
+        str,
+        "What kind of 3D model to look for in the library, e.g. 'chair', 'dog', "
+        "'spaceship'. A short noun phrase works best.",
+    ],
+) -> str:
+    """Search the Microsoft 3D-model library for downloadable GLB models.
+
+    Returns a JSON array (as a string) of up to a few models, each shaped like
+    {"name": str, "imageUrl": str, "modelUrl": str}:
+      * imageUrl is a thumbnail preview the web client shows in the chat.
+      * modelUrl is the GLB download link to pass to `download_model` when the user
+        picks one.
+    Returns "[]" when nothing matches, or a string starting with "ERROR:" on failure.
+    """
+    print(f"[agent] tool list_available_models: query={query!r}", flush=True)
+    payload = {
+        "type": "Search",
+        "pageSize": MODEL_SEARCH_PAGE_SIZE,
+        "query": query,
+        "parameters": {"firstpartycontent": False, "app": "office"},
+        "descriptor": {"$type": "FirstPartyContentSearchDescriptor"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                MODEL_SEARCH_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+            content = response.json()
+    except Exception as exc:  # noqa: BLE001 - surface any transport error to the model
+        print(f"[agent] tool list_available_models: transport error ({exc})", flush=True)
+        return f"ERROR: could not reach the model library ({exc})."
+
+    result = content.get("Result") or {}
+    part_groups = result.get("PartGroups") or []
+    models: list[dict[str, str]] = []
+    for group in part_groups:
+        image_parts = group.get("ImageParts") or []
+        image_url = image_parts[0].get("SourceUrl") if image_parts else None
+
+        title = None
+        model_url = None
+        for text_part in group.get("TextParts") or []:
+            category = text_part.get("TextCategory")
+            if category == "Title":
+                title = text_part.get("Text")
+            elif category == "OasisGlbLink":
+                model_url = text_part.get("Text")
+
+        # Only surface entries that have everything the client needs to show + load them.
+        if title and image_url and model_url:
+            models.append({"name": title, "imageUrl": image_url, "modelUrl": model_url})
+
+    print(f"[agent] tool list_available_models: {len(models)} model(s) found", flush=True)
+    return json.dumps(models)
+
+
+@tool(approval_mode="never_require")
+async def download_model(
+    model_url: Annotated[
+        str,
+        "The GLB download link (modelUrl) of the model to load, taken from a previous "
+        "list_available_models result.",
+    ],
+    name: Annotated[
+        str,
+        "A short, descriptive name for the loaded model. Becomes the Babylon.js mesh "
+        "name so later code can reference it (e.g. 'red_chair').",
+    ],
+    scale: Annotated[
+        float,
+        "Uniform scale applied to the imported model. Use 1 unless the user asks for a "
+        "bigger or smaller model.",
+    ] = 1.0,
+) -> str:
+    """Build the Babylon.js snippet that loads a chosen GLB model into the live scene.
+
+    Returns runnable Babylon.js code (no markdown) that imports `model_url`, names the
+    root mesh `name` and scales it by `scale`. The code is deterministic, so it does NOT
+    need to be validated — put it straight into the ```javascript block of your reply.
+    """
+    print(
+        f"[agent] tool download_model: name={name!r} scale={scale} url={model_url!r}",
+        flush=True,
+    )
+    last_slash = model_url.rfind("/")
+    base_url = model_url[: last_slash + 1]
+    file_name = model_url[last_slash + 1 :]
+    # Encode through JSON so any quotes in the values can't break out of the JS string.
+    js_name = json.dumps(name)
+    js_base = json.dumps(base_url)
+    js_file = json.dumps(file_name)
+    code = (
+        f"BABYLON.SceneLoader.ImportMesh(\"\", {js_base}, {js_file}, scene, "
+        f"function (newMeshes) {{\n"
+        f"  if (newMeshes[0]) {{\n"
+        f"    newMeshes[0].name = {js_name};\n"
+        f"    newMeshes[0].scaling = new BABYLON.Vector3({scale}, {scale}, {scale});\n"
+        f"  }}\n"
+        f"}});"
+    )
+    return code
+
+
 BASE_INSTRUCTIONS = """\
 You are Babylon3DAgent, an assistant that builds interactive 3D worlds by writing
 Babylon.js (https://www.babylonjs.com) JavaScript code.
@@ -117,6 +242,35 @@ When you reply to the user:
   * Give a short, friendly explanation of what you are adding to the scene.
   * Provide the code in a single ```javascript fenced code block. The web client
     extracts that block and executes it in the canvas, so it MUST be valid on its own.
+
+Loading real 3D models from the library:
+  You also have two tools to bring ready-made GLB models (chairs, animals, vehicles,
+  characters, …) into the scene instead of building everything from primitives:
+    * `list_available_models(query)` — search the library. It returns a JSON array of
+      models, each with `name`, `imageUrl` (a thumbnail) and `modelUrl`.
+    * `download_model(model_url, name, scale)` — returns the Babylon.js code that loads
+      a chosen model into the scene.
+
+  Workflow:
+    * When the user wants to find or browse real models ("find a chair", "show me some
+      dinosaurs", "do you have a spaceship?"), call `list_available_models`. Then, in
+      your reply, include the tool's JSON array VERBATIM inside a single fenced block
+      tagged ```models (NOT ```javascript). The web client renders those thumbnails as a
+      gallery in the chat. Add a short friendly sentence before the block. Do NOT also
+      write Babylon.js code in this turn — just present the gallery.
+    * Example reply shape:
+        Here are a few chairs I found:
+        ```models
+        [{"name":"Wooden Chair","imageUrl":"https://…","modelUrl":"https://….glb"}]
+        ```
+    * When the user then picks one ("load the wooden one", "add the 2nd", "the
+      spaceship"), call `download_model` with that model's `modelUrl`, a short
+      descriptive `name`, and a `scale` (1 unless they ask bigger/smaller). Put the code
+      it returns into a single ```javascript block so the browser loads the model. This
+      model-loading code is deterministic — do NOT validate it.
+    * If `list_available_models` returns "[]", tell the user nothing matched and suggest
+      a different search term. If it returns an "ERROR:…" string, briefly apologize and
+      do not include a ```models block.
 """
 
 VALIDATION_INSTRUCTIONS = """\
@@ -131,6 +285,8 @@ Validation workflow (REQUIRED):
     valid code and do not include a code block.
   * The validation sandbox shares the same cumulative scene state as the browser, so
     only validate the NEW snippet for the current turn.
+  * Only validate code YOU wrote. Model-loading code returned by `download_model` is
+    deterministic and must NOT be validated.
 """
 
 
@@ -150,13 +306,17 @@ def create_chat_client() -> FoundryChatClient:
 
 
 def create_agent(client: FoundryChatClient) -> Agent:
-    """Create the Agent with or without the validation tool, based on the flag.
+    """Create the Agent with its tools.
 
+    The model-discovery tools (`list_available_models`, `download_model`) are always
+    available; the `validate_babylon_code` tool is added only when validation is enabled.
     No `name=` is passed: the hosted-agent identity comes from agent.yaml. `store` is
     disabled so the Foundry service does not persist server-side conversation state —
     the web client drives multi-turn continuity via `previous_response_id`.
     """
-    tools = [validate_babylon_code] if _validation_enabled() else None
+    tools = [list_available_models, download_model]
+    if _validation_enabled():
+        tools.append(validate_babylon_code)
     return Agent(
         client=client,
         instructions=build_instructions(),

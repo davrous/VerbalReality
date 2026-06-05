@@ -124,6 +124,34 @@
     return blocks;
   }
 
+  // Extract ```models fenced blocks and parse each as a JSON array of
+  // { name, imageUrl, modelUrl }. The agent emits the list_available_models tool output
+  // verbatim inside such a block so we can render the thumbnails as a gallery.
+  function extractModelBlocks(text) {
+    const models = [];
+    const re = /```models\s*\n([\s\S]*?)```/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      let parsed;
+      try {
+        parsed = JSON.parse(m[1].trim());
+      } catch (_) {
+        continue;
+      }
+      if (!Array.isArray(parsed)) continue;
+      for (const item of parsed) {
+        if (item && item.imageUrl && item.name) {
+          models.push({
+            name: String(item.name),
+            imageUrl: String(item.imageUrl),
+            modelUrl: item.modelUrl ? String(item.modelUrl) : "",
+          });
+        }
+      }
+    }
+    return models;
+  }
+
   // ---------------------------------------------------------------------------
   // Chat UI
   // ---------------------------------------------------------------------------
@@ -137,11 +165,107 @@
     statusDot.className = state || "";
   }
 
+  // Build and run the Babylon.js snippet that imports a chosen GLB into the live scene.
+  // This mirrors the agent's `download_model` tool, but runs client-side so clicking a
+  // gallery thumbnail loads the model instantly — no round-trip through the LLM.
+  function loadModelFromUrl(modelUrl, name) {
+    const lastSlash = modelUrl.lastIndexOf("/");
+    const baseUrl = modelUrl.slice(0, lastSlash + 1);
+    const fileName = modelUrl.slice(lastSlash + 1);
+    // JSON.stringify safely escapes the values into JS string literals.
+    const code =
+      "BABYLON.SceneLoader.ImportMesh(\"\", " +
+      JSON.stringify(baseUrl) +
+      ", " +
+      JSON.stringify(fileName) +
+      ", scene, function (newMeshes) {\n" +
+      "  if (newMeshes[0]) {\n" +
+      "    newMeshes[0].name = " +
+      JSON.stringify(name) +
+      ";\n" +
+      "    newMeshes[0].scaling = new BABYLON.Vector3(1, 1, 1);\n" +
+      "  }\n" +
+      "});";
+    const result = executeCode(code);
+    if (!result.ok) {
+      addMessage("error", "⚠️ Could not load \"" + name + "\": " + result.error);
+      return false;
+    }
+    return true;
+  }
+
+  // Handle a gallery thumbnail click: load the model instantly client-side, then tell
+  // the agent (via a silent context note over the same conversation) which model is now
+  // in the scene. That keeps natural-language follow-ups like "make it 10x smaller"
+  // working, because the agent learns the loaded mesh's name without re-running the load.
+  async function loadModelFromGallery(modelUrl, name) {
+    const ok = loadModelFromUrl(modelUrl, name);
+    if (!ok) return;
+    addMessage("system", "Loaded “" + name + "” into the scene.");
+    const note =
+      "[scene event] The user loaded the 3D model \"" +
+      name +
+      "\" into the scene by clicking its thumbnail in the gallery. Its root mesh is " +
+      "named \"" +
+      name +
+      "\" and the model is ALREADY loaded — do NOT output or validate any code for " +
+      "this. Reply with a brief one-line confirmation, and remember \"" +
+      name +
+      "\" so you can reference it in later requests (e.g. scaling, moving, animating it).";
+    await sendMessage(note, {
+      userBubbleText: null,
+      runCode: false,
+      initialActivity: "\uD83D\uDCDD Noting the loaded model…",
+    });
+  }
+
+  // Build a thumbnail gallery for the models the agent surfaced. The parsed `modelUrl`
+  // is stashed on each card (data attribute) so a future VR/canvas selector can reuse
+  // it without another round-trip to the agent. Clicking a card loads it immediately.
+  function buildModelGallery(models) {
+    const gallery = document.createElement("div");
+    gallery.className = "model-gallery";
+    for (const model of models) {
+      const card = document.createElement("figure");
+      card.className = "model-card";
+      if (model.modelUrl) {
+        card.dataset.modelUrl = model.modelUrl;
+        card.classList.add("loadable");
+        card.title = "Click to load “" + model.name + "” into the scene";
+        card.setAttribute("role", "button");
+        card.tabIndex = 0;
+        const load = () => loadModelFromGallery(model.modelUrl, model.name);
+        card.addEventListener("click", load);
+        card.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            load();
+          }
+        });
+      }
+      card.dataset.modelName = model.name;
+
+      const img = document.createElement("img");
+      img.src = model.imageUrl;
+      img.alt = model.name;
+      img.loading = "lazy";
+
+      const caption = document.createElement("figcaption");
+      caption.textContent = model.name;
+
+      card.appendChild(img);
+      card.appendChild(caption);
+      gallery.appendChild(card);
+    }
+    return gallery;
+  }
+
   // (Re)fill a message element's content: prose plus any extracted code blocks.
   function fillMessage(el, text, codeBlocks) {
     el.textContent = "";
+    const models = extractModelBlocks(text);
     if (codeBlocks && codeBlocks.length) {
-      const prose = text.replace(/```(?:javascript|js)?\s*\n[\s\S]*?```/gi, "").trim();
+      const prose = stripFencedBlocks(text);
       if (prose) {
         const p = document.createElement("div");
         p.textContent = prose;
@@ -154,9 +278,24 @@
         pre.appendChild(codeEl);
         el.appendChild(pre);
       }
+    } else if (models.length) {
+      const prose = stripFencedBlocks(text);
+      if (prose) {
+        const p = document.createElement("div");
+        p.textContent = prose;
+        el.appendChild(p);
+      }
     } else {
       el.textContent = text;
     }
+    // Always render the gallery (when present) after the prose.
+    if (models.length) el.appendChild(buildModelGallery(models));
+  }
+
+  // Remove every fenced block (```javascript, ```models, …) from the text so only the
+  // agent's prose remains for display.
+  function stripFencedBlocks(text) {
+    return text.replace(/```[a-z]*\s*\n[\s\S]*?```/gi, "").trim();
   }
 
   let activityEl = null;
@@ -190,12 +329,14 @@
 
   const TOOL_LABELS = {
     validate_babylon_code: "Validating the Babylon.js code…",
+    list_available_models: "Searching the 3D model library…",
+    download_model: "Loading the 3D model…",
   };
   function friendlyTool(name, attempt) {
     const base = TOOL_LABELS[name] || "Calling " + (name || "a tool") + "…";
-    // On the first attempt show the plain label; from the second one onward make it
-    // clear this is a retry and how many attempts have been made.
-    if (attempt && attempt > 1) {
+    // Only validation is expected to repeat (fix-and-retry). For that tool, from the
+    // second attempt onward make it clear this is a retry and how many have been made.
+    if (name === "validate_babylon_code" && attempt && attempt > 1) {
       return base + " (attempt " + attempt + " of " + MAX_VALIDATION_ATTEMPTS + ")";
     }
     return base;
@@ -214,12 +355,21 @@
     return el;
   }
 
-  async function sendMessage(message) {
-    addMessage("user", message);
+  async function sendMessage(message, opts) {
+    const options = opts || {};
+    // userBubbleText === null suppresses the user bubble (used for silent context
+    // notes the UI has already represented some other way, e.g. a gallery click).
+    const userBubbleText =
+      options.userBubbleText !== undefined ? options.userBubbleText : message;
+    const runCode = options.runCode !== false; // default: execute returned code
+    const initialActivity =
+      options.initialActivity || "\uD83E\uDDE0 Generating the Babylon.js code…";
+
+    if (userBubbleText !== null) addMessage("user", userBubbleText);
     setStatus("busy");
     sendBtn.disabled = true;
-    if (window.ActivityIndicators) window.ActivityIndicators.start(message);
-    setActivity("\uD83E\uDDE0 Generating the Babylon.js code…");
+    if (runCode && window.ActivityIndicators) window.ActivityIndicators.start(message);
+    setActivity(initialActivity);
 
     let reply = "";
     let errored = false;
@@ -281,7 +431,8 @@
           if (evt.type === "tool") {
             const attempt = (toolAttempts[evt.name] = (toolAttempts[evt.name] || 0) + 1);
             setActivity("\uD83D\uDD27 " + friendlyTool(evt.name, attempt));
-            if (window.ActivityIndicators) window.ActivityIndicators.notifyTool(evt.name, attempt);
+            if (runCode && window.ActivityIndicators)
+              window.ActivityIndicators.notifyTool(evt.name, attempt);
           } else if (evt.type === "delta") {
             reply += evt.text || "";
             setActivity("\u270D\uFE0F Writing the Babylon.js scene…");
@@ -315,15 +466,18 @@
       else addMessage("agent", reply, { codeBlocks });
       messagesEl.scrollTop = messagesEl.scrollHeight;
 
-      // Run each returned snippet in the live canvas.
-      if (codeBlocks.length) setActivity("⚙️ Running the generated code in the canvas…");
-      for (const code of codeBlocks) {
-        const result = executeCode(code);
-        if (!result.ok) {
-          addMessage(
-            "error",
-            "⚠️ The returned code threw while running in the canvas: " + result.error
-          );
+      // Run each returned snippet in the live canvas (unless this is a silent context
+      // note, where the model was already loaded client-side and no code should run).
+      if (runCode) {
+        if (codeBlocks.length) setActivity("⚙️ Running the generated code in the canvas…");
+        for (const code of codeBlocks) {
+          const result = executeCode(code);
+          if (!result.ok) {
+            addMessage(
+              "error",
+              "⚠️ The returned code threw while running in the canvas: " + result.error
+            );
+          }
         }
       }
       setStatus("");
