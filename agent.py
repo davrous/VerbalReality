@@ -182,8 +182,10 @@ async def download_model(
     ],
     scale: Annotated[
         float,
-        "Uniform scale applied to the imported model. Use 1 unless the user asks for a "
-        "bigger or smaller model.",
+        "Relative size multiplier for the imported model. The page already auto-scales "
+        "every model to a consistent canonical size, so use 1 normally, and only pass a "
+        "different value when the user asks for a bigger or smaller model (e.g. 2 = twice "
+        "as big, 0.5 = half).",
     ] = 1.0,
 ) -> str:
     """Build the Babylon.js snippet that loads a chosen GLB model into the live scene.
@@ -208,7 +210,11 @@ async def download_model(
         f"function (newMeshes) {{\n"
         f"  if (newMeshes[0]) {{\n"
         f"    newMeshes[0].name = {js_name};\n"
-        f"    newMeshes[0].scaling = new BABYLON.Vector3({scale}, {scale}, {scale});\n"
+        f"    if (window.SceneFit) {{\n"
+        f"      SceneFit.fitImportedModel(scene, camera, newMeshes[0], {scale});\n"
+        f"    }} else {{\n"
+        f"      newMeshes[0].scaling = new BABYLON.Vector3({scale}, {scale}, {scale});\n"
+        f"    }}\n"
         f"  }}\n"
         f"}});"
     )
@@ -237,6 +243,11 @@ Rules for the code you generate:
     (e.g. `BABYLON.MeshBuilder.CreateBox("box1", {size: 2}, scene)`).
   * Prefer BABYLON.MeshBuilder.* factory methods and StandardMaterial/PBRMaterial.
   * To animate, register with `scene.onBeforeRenderObservable.add(() => { ... })`.
+  * The page AUTO-SCALES whatever you add each turn to a consistent canonical size and
+    frames the camera on it, so you do NOT need to worry about absolute units or making
+    things fit the view. Focus on correct RELATIVE proportions between objects (a door
+    smaller than its wall, a wheel smaller than its car). Build near the origin; the
+    page rests new content on the ground and centers the first object for you.
 
 When you reply to the user:
   * Give a short, friendly explanation of what you are adding to the scene.
@@ -265,8 +276,10 @@ Loading real 3D models from the library:
         ```
     * When the user then picks one ("load the wooden one", "add the 2nd", "the
       spaceship"), call `download_model` with that model's `modelUrl`, a short
-      descriptive `name`, and a `scale` (1 unless they ask bigger/smaller). Put the code
-      it returns into a single ```javascript block so the browser loads the model. This
+      descriptive `name`, and a `scale` (1 unless they ask bigger/smaller). The page
+      auto-scales imported models to the same canonical size, so `scale` is just a
+      RELATIVE multiplier on top of that (e.g. 2 for "twice as big"). Put the code it
+      returns into a single ```javascript block so the browser loads the model. This
       model-loading code is deterministic — do NOT validate it.
     * If `list_available_models` returns "[]", tell the user nothing matched and suggest
       a different search term. If it returns an "ERROR:…" string, briefly apologize and

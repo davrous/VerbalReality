@@ -183,7 +183,8 @@
       "    newMeshes[0].name = " +
       JSON.stringify(name) +
       ";\n" +
-      "    newMeshes[0].scaling = new BABYLON.Vector3(1, 1, 1);\n" +
+      "    if (window.SceneFit) SceneFit.fitImportedModel(scene, camera, newMeshes[0], 1);\n" +
+      "    else newMeshes[0].scaling = new BABYLON.Vector3(1, 1, 1);\n" +
       "  }\n" +
       "});";
     const result = executeCode(code);
@@ -470,6 +471,9 @@
       // note, where the model was already loaded client-side and no code should run).
       if (runCode) {
         if (codeBlocks.length) setActivity("⚙️ Running the generated code in the canvas…");
+        // Snapshot the scene before running so SceneFit can normalize only what's new.
+        const beforeFit =
+          codeBlocks.length && window.SceneFit ? SceneFit.snapshot(scene) : null;
         for (const code of codeBlocks) {
           const result = executeCode(code);
           if (!result.ok) {
@@ -479,6 +483,8 @@
             );
           }
         }
+        // Auto-scale this turn's new content to a canonical size and frame the camera.
+        if (beforeFit) SceneFit.fitNewContent(scene, camera, beforeFit);
       }
       setStatus("");
     } catch (err) {

@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/microsoft/AgentSchema/refs/heads/main/schemas/v1.0/ContainerAgent.yaml
 
 kind: hosted
-name: babylon3d-agent
+name: verbalreality
 description: >
   An AI agent that builds an interactive 3D scene by generating Babylon.js
   JavaScript from natural language. The web client runs the returned code in a

@@ -1,4 +1,4 @@
-![Markdown Logo](./VerbalRealityLogo.png "Verbal Reality Logo")
+![Markdown Logo](./webchat/public/VerbalRealityLogo.png "Verbal Reality Logo")
 
 # Verbal Reality
 
