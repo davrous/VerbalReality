@@ -9,25 +9,121 @@
 // and runs the ```javascript code block.
 //
 // Env:
-//   PORT            web server port (default 3000)
-//   AGENT_ENDPOINT  agent Responses API URL (default http://localhost:8088/responses)
-//   AGENT_MODEL     model field sent in the request (default gpt-4.1)
+//   PORT                   web server port (default 3000)
+//   LOCAL_AGENT_ENDPOINT   local agent Responses API URL
+//                          (default http://localhost:8088/responses; AGENT_ENDPOINT is
+//                          accepted as a legacy alias)
+//   REMOTE_AGENT_PROJECT_ENDPOINT  Foundry project endpoint, shape:
+//                          https://<resource>.services.ai.azure.com/api/projects/<project>
+//                          (falls back to PROJECT_ENDPOINT, shared with the Python agent)
+//   REMOTE_AGENT_NAME      deployed hosted agent name (from agent.yaml, e.g. verbalreality)
+//   REMOTE_AGENT_API_VERSION  data-plane api-version (default 2025-11-15-preview)
+//   REMOTE_AGENT_ENDPOINT  optional explicit override of the full Responses URL. When set,
+//                          it wins over the project-endpoint + name composition above.
+//                          When the remote target is configured, the backend attaches an
+//                          Azure AD bearer token to upstream requests.
+//   REMOTE_AGENT_SCOPE     token scope for the remote agent
+//                          (default https://ai.azure.com/.default)
+//   AGENT_MODEL            model field sent in the request (default gpt-4.1)
 
 const path = require("path");
 const express = require("express");
+const { DefaultAzureCredential } = require("@azure/identity");
+
+// Load the repo-root .env (shared with the Python agent) so values like
+// REMOTE_AGENT_ENDPOINT are picked up. Existing process env vars win over the file.
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const PORT = process.env.PORT || 3000;
-const AGENT_ENDPOINT =
-  process.env.AGENT_ENDPOINT || "http://localhost:8088/responses";
+const LOCAL_AGENT_ENDPOINT =
+  process.env.LOCAL_AGENT_ENDPOINT ||
+  process.env.AGENT_ENDPOINT ||
+  "http://localhost:8088/responses";
+
+// Remote (Foundry hosted) agent: prefer specifying the project endpoint + agent name and
+// let us compose the Responses URL, rather than hand-building the long data-plane URL.
+// REMOTE_AGENT_ENDPOINT (a full Responses URL) is still honored as an explicit override.
+const REMOTE_AGENT_PROJECT_ENDPOINT = (
+  process.env.REMOTE_AGENT_PROJECT_ENDPOINT ||
+  process.env.PROJECT_ENDPOINT ||
+  ""
+)
+  .trim()
+  .replace(/\/+$/, "");
+const REMOTE_AGENT_NAME = (process.env.REMOTE_AGENT_NAME || "").trim();
+const REMOTE_AGENT_API_VERSION = (
+  process.env.REMOTE_AGENT_API_VERSION || "2025-11-15-preview"
+).trim();
+
+// Build the hosted-agent Responses URL from its parts:
+//   <project-endpoint>/agents/<name>/endpoint/protocols/openai/responses?api-version=<ver>
+function buildRemoteResponsesUrl(projectEndpoint, agentName, apiVersion) {
+  if (!projectEndpoint || !agentName) return "";
+  return (
+    `${projectEndpoint}/agents/${encodeURIComponent(agentName)}` +
+    `/endpoint/protocols/openai/responses?api-version=${encodeURIComponent(apiVersion)}`
+  );
+}
+
+const REMOTE_AGENT_ENDPOINT = (
+  process.env.REMOTE_AGENT_ENDPOINT ||
+  buildRemoteResponsesUrl(
+    REMOTE_AGENT_PROJECT_ENDPOINT,
+    REMOTE_AGENT_NAME,
+    REMOTE_AGENT_API_VERSION
+  )
+).trim();
+const REMOTE_AGENT_SCOPE =
+  process.env.REMOTE_AGENT_SCOPE || "https://ai.azure.com/.default";
 const AGENT_MODEL = process.env.AGENT_MODEL || "gpt-4.1";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-// In-memory map of sessionId -> last response id, to preserve conversation context
-// (so the cumulative 3D scene history is kept on the agent side).
+// Resolve the upstream agent endpoint for a request target ("local" | "remote").
+function endpointForTarget(target) {
+  return target === "remote" ? REMOTE_AGENT_ENDPOINT : LOCAL_AGENT_ENDPOINT;
+}
+
+// ---------------------------------------------------------------------------
+// Remote (Foundry hosted) agent auth — mint and cache an Azure AD bearer token
+// via DefaultAzureCredential (same auth the Python agent uses). The credential is
+// created lazily so local-only usage never touches Azure identity.
+// ---------------------------------------------------------------------------
+let credential = null;
+let cachedToken = null; // { token, expiresOnTimestamp }
+
+async function getRemoteAuthHeader() {
+  if (!credential) credential = new DefaultAzureCredential();
+  const now = Date.now();
+  // Refresh ~5 minutes before expiry to avoid using a token that lapses mid-request.
+  if (
+    !cachedToken ||
+    !cachedToken.expiresOnTimestamp ||
+    cachedToken.expiresOnTimestamp - now < 5 * 60 * 1000
+  ) {
+    const result = await credential.getToken(REMOTE_AGENT_SCOPE);
+    if (!result || !result.token) {
+      throw new Error("DefaultAzureCredential returned no token.");
+    }
+    cachedToken = {
+      token: result.token,
+      expiresOnTimestamp: result.expiresOnTimestamp,
+    };
+  }
+  return `Bearer ${cachedToken.token}`;
+}
+
+// In-memory map of `${sessionId}::${target}` -> last response id, to preserve
+// conversation context (so the cumulative 3D scene history is kept on the agent side).
+// Local and remote agents keep SEPARATE threads: a previous_response_id from one is not
+// valid for the other, so the target is part of the key.
 const sessions = new Map();
+
+function sessionKey(sessionId, target) {
+  return `${sessionId}::${target === "remote" ? "remote" : "local"}`;
+}
 
 // Extract plain text from an OpenAI Responses API payload across known shapes.
 function extractText(payload) {
@@ -56,12 +152,12 @@ function sendEvent(res, obj) {
 
 // Dispatch one parsed upstream Responses-API event to our simplified browser protocol.
 // Returns the reply text if this event completed the response, otherwise null.
-function handleUpstreamEvent(evt, res, sessionId, state) {
+function handleUpstreamEvent(evt, res, sKey, state) {
   if (!evt || typeof evt !== "object") return null;
   const type = evt.type || "";
 
   // Capture the response id as early as possible for multi-turn continuity.
-  if (evt.response && evt.response.id) sessions.set(sessionId, evt.response.id);
+  if (evt.response && evt.response.id) sessions.set(sKey, evt.response.id);
 
   if (type.endsWith("output_text.delta") && typeof evt.delta === "string") {
     state.text += evt.delta;
@@ -107,8 +203,17 @@ function handleUpstreamEvent(evt, res, sessionId, state) {
 app.post("/api/chat", async (req, res) => {
   const message = req.body && req.body.message;
   const sessionId = (req.body && req.body.sessionId) || "default";
+  const target = req.body && req.body.target === "remote" ? "remote" : "local";
   if (typeof message !== "string" || message.trim() === "") {
     return res.status(400).json({ error: "Empty message." });
+  }
+
+  const endpoint = endpointForTarget(target);
+  if (!endpoint) {
+    return res.status(400).json({
+      error:
+        "Remote agent is not configured. Set REMOTE_AGENT_PROJECT_ENDPOINT (or PROJECT_ENDPOINT) and REMOTE_AGENT_NAME to use the deployed Foundry agent.",
+    });
   }
 
   // Respond as a Server-Sent Events stream so the browser can render live activity
@@ -119,20 +224,41 @@ app.post("/api/chat", async (req, res) => {
     Connection: "keep-alive",
   });
 
+  const sKey = sessionKey(sessionId, target);
   const body = {
     model: AGENT_MODEL,
     input: message,
     stream: true,
   };
-  const previousResponseId = sessions.get(sessionId);
+  const previousResponseId = sessions.get(sKey);
   if (previousResponseId) body.previous_response_id = previousResponseId;
 
   const state = { text: "", errored: false, seenToolItems: new Set() };
 
   try {
-    const upstream = await fetch(AGENT_ENDPOINT, {
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    };
+    // The deployed Foundry hosted agent requires an Azure AD bearer token; the local
+    // agent needs none.
+    if (target === "remote") {
+      try {
+        headers.Authorization = await getRemoteAuthHeader();
+      } catch (authErr) {
+        sendEvent(res, {
+          type: "error",
+          error: `Could not authenticate to the remote agent: ${
+            authErr.message || authErr
+          }. Run 'az login' or check REMOTE_AGENT_SCOPE.`,
+        });
+        return res.end();
+      }
+    }
+
+    const upstream = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers,
       body: JSON.stringify(body),
     });
 
@@ -157,7 +283,7 @@ app.post("/api/chat", async (req, res) => {
         sendEvent(res, { type: "error", error: `Invalid agent response: ${raw}` });
         return res.end();
       }
-      if (payload.id) sessions.set(sessionId, payload.id);
+      if (payload.id) sessions.set(sKey, payload.id);
       sendEvent(res, { type: "done", reply: extractText(payload) });
       return res.end();
     }
@@ -194,7 +320,7 @@ app.post("/api/chat", async (req, res) => {
         } catch (_) {
           continue;
         }
-        const maybeReply = handleUpstreamEvent(evt, res, sessionId, state);
+        const maybeReply = handleUpstreamEvent(evt, res, sKey, state);
         if (maybeReply !== null) reply = maybeReply;
       }
     }
@@ -212,13 +338,27 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// Reset only clears the local conversation context. The browser clears its own canvas.
+// Tell the front-end which targets are available so it can enable/disable the switch.
+app.get("/api/config", (req, res) => {
+  res.json({
+    localConfigured: Boolean(LOCAL_AGENT_ENDPOINT),
+    remoteConfigured: Boolean(REMOTE_AGENT_ENDPOINT),
+  });
+});
+
+// Reset clears the conversation context for BOTH targets of this session. The browser
+// clears its own canvas.
 app.post("/api/reset", (req, res) => {
   const sessionId = (req.body && req.body.sessionId) || "default";
-  sessions.delete(sessionId);
+  sessions.delete(sessionKey(sessionId, "local"));
+  sessions.delete(sessionKey(sessionId, "remote"));
   res.json({ ok: true });
 });
 
 app.listen(PORT, () => {
-  console.log(`Web chat on http://localhost:${PORT}  ->  agent ${AGENT_ENDPOINT}`);
+  console.log(`Web chat on http://localhost:${PORT}`);
+  console.log(`  local  agent -> ${LOCAL_AGENT_ENDPOINT}`);
+  console.log(
+    `  remote agent -> ${REMOTE_AGENT_ENDPOINT || "(not configured)"}`
+  );
 });

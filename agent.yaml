@@ -22,12 +22,15 @@ environment_variables:
     value: "{{PROJECT_ENDPOINT}}"
   - name: MODEL_DEPLOYMENT_NAME
     value: "{{MODEL_DEPLOYMENT_NAME}}"
-  # The validation tool calls a separate Node NullEngine service (see ./validator)
-  # that only exists in local dev — it is NOT part of this container. Hosted deploys
-  # therefore run with validation disabled.
+  # The validation tool calls a Node Babylon NullEngine service. In this image that
+  # service is co-hosted alongside the Python agent (see Dockerfile + start.sh) and
+  # listens on localhost:8087, so server-side validation is ENABLED for hosted deploys.
   - name: ENABLE_VALIDATION
-    value: "false"
+    value: "true"
+  - name: VALIDATOR_URL
+    value: "http://localhost:8087/validate"
 dockerfile_path: Dockerfile
 resources:
+  # Bumped from 1.0/2.0Gi to fit Python + Node + Babylon.js running together.
   cpu: '1.0'
   memory: 2.0Gi

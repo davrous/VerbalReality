@@ -160,9 +160,47 @@
   const input = document.getElementById("chat-input");
   const sendBtn = document.getElementById("send-btn");
   const statusDot = document.getElementById("status-dot");
+  const targetSelect = document.getElementById("agent-target");
+
+  // Which agent answers: "local" (no auth) or "remote" (deployed Foundry hosted agent).
+  // Each target keeps its own conversation thread on the backend, so switching mid-session
+  // means the newly-selected agent doesn't know what the other one built.
+  let agentTarget = (targetSelect && targetSelect.value) || "local";
 
   function setStatus(state) {
     statusDot.className = state || "";
+  }
+
+  // Ask the backend which targets are available; disable Remote when it isn't configured.
+  (async function initTargets() {
+    if (!targetSelect) return;
+    try {
+      const resp = await fetch("/api/config");
+      if (!resp.ok) return;
+      const cfg = await resp.json();
+      const remoteOpt = targetSelect.querySelector('option[value="remote"]');
+      if (remoteOpt && !cfg.remoteConfigured) {
+        remoteOpt.disabled = true;
+        remoteOpt.textContent = "Foundry (not configured)";
+      }
+    } catch (_) {
+      /* leave defaults; backend will reject an unconfigured remote request */
+    }
+  })();
+
+  if (targetSelect) {
+    targetSelect.addEventListener("change", () => {
+      agentTarget = targetSelect.value === "remote" ? "remote" : "local";
+      const label =
+        agentTarget === "remote" ? "Foundry (remote)" : "the local agent";
+      addMessage(
+        "system",
+        "Switched to " +
+          label +
+          ". Note: each agent keeps its own conversation, so it won't remember items the " +
+          "other agent built (the 3D scene on screen is kept)."
+      );
+    });
   }
 
   // Build and run the Babylon.js snippet that imports a chosen GLB into the live scene.
@@ -385,7 +423,7 @@
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
-        body: JSON.stringify({ message, sessionId }),
+        body: JSON.stringify({ message, sessionId, target: agentTarget }),
       });
 
       if (!resp.ok || !resp.body) {
@@ -504,7 +542,7 @@
       await fetch("/api/reset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify({ sessionId, target: agentTarget }),
       });
     } catch (_) {
       /* local reset already done; ignore network errors */

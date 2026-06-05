@@ -21,6 +21,12 @@
       <div id="chat-pane">
         <header id="chat-header">
           <h1>Verbal Reality</h1>
+          <label id="agent-target-label" for="agent-target" title="Choose which agent answers">
+            <select id="agent-target" aria-label="Agent target">
+              <option value="local" selected>Local agent</option>
+              <option value="remote">Foundry (remote)</option>
+            </select>
+          </label>
           <span id="status-dot" title="agent status"></span>
         </header>
         <div id="messages" aria-live="polite"></div>

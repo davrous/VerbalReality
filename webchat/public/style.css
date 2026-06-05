@@ -114,12 +114,47 @@ body.resizing {
   font-weight: 600;
 }
 
+#agent-target-label {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+#agent-target {
+  appearance: none;
+  -webkit-appearance: none;
+  background: #1b2138;
+  color: #e8ebf5;
+  border: 1px solid #2a3050;
+  border-radius: 6px;
+  padding: 4px 26px 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23aab2d5' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+
+#agent-target:hover {
+  border-color: #3a4170;
+}
+
+#agent-target:focus {
+  outline: none;
+  border-color: #5a6bd8;
+}
+
+#agent-target option:disabled {
+  color: #6a7090;
+}
+
 #status-dot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
   background: #4caf50;
-  margin-left: auto;
+  margin-left: 4px;
 }
 
 #status-dot.busy {

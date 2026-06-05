@@ -60,7 +60,7 @@ flowchart LR
         tools["Tools:<br/>validate_babylon_code<br/>list_available_models<br/>download_model"]
     end
 
-    validator["Validator — validator/server.js<br/>Babylon NullEngine<br/>POST /validate (local dev only)"]
+    validator["Validator — validator/server.js<br/>Babylon NullEngine<br/>POST /validate (bundled in agent image)"]
     foundry["Microsoft Foundry<br/>project + model deployment"]
     library["Microsoft 3D-model service<br/>(officeapps media search)"]
 
@@ -181,13 +181,25 @@ Open http://localhost:3000 and start describing the 3D scene you want.
 ## Deploy (hosted agent)
 
 [agent.yaml](agent.yaml) declares the hosted-agent identity (`kind: hosted`, name
-`verbalreality`, Responses protocol) and [Dockerfile](Dockerfile) packages the Python
-agent. The agent's name is defined **only** in `agent.yaml` — never in `Agent(...)` —
-which is why server-side registration of a `kind: prompt` agent must be avoided.
+`verbalreality`, Responses protocol) and [Dockerfile](Dockerfile) packages the agent.
+The agent's name is defined **only** in `agent.yaml` — never in `Agent(...)` — which is
+why server-side registration of a `kind: prompt` agent must be avoided.
 
-The NullEngine validator is a local-dev-only Node service and is **not** in the
-container, so `agent.yaml` sets `ENABLE_VALIDATION=false` for hosted deploys. To validate
-server-side in production you would co-host the validator (or port it into the agent).
+Server-side validation **is** available in production: the image bundles both runtimes —
+the Python agent (Responses API on 8088) and the Node.js Babylon `NullEngine` validator
+(`/validate` on 8087) — and [start.sh](start.sh) launches the validator in the background,
+waits for it to become healthy, then execs the agent. `agent.yaml` therefore sets
+`ENABLE_VALIDATION=true` and points `VALIDATOR_URL` at `http://localhost:8087/validate`.
+Foundry runs a single container per hosted agent, so co-hosting the validator (rather than
+running it as a separate service) is what keeps validation working once deployed.
+
+Build and push the image to ACR, then create/update the agent (see the Foundry hosted-agent
+deploy workflow). Use cloud build if you don't have Docker locally:
+
+```bash
+az acr build --registry <acr-name> --image verbalreality:$(date +%Y%m%d%H%M) \
+  --platform linux/amd64 --source-acr-auth-id "[caller]" --file Dockerfile .
+```
 
 ## Usage tips
 
@@ -211,6 +223,92 @@ server-side in production you would co-host the validator (or port it into the a
 | `MODEL_SEARCH_URL` | Microsoft 3D-model search endpoint used by `list_available_models` | _(officeapps media search)_ |
 | `MODEL_SEARCH_PAGE_SIZE` | Max models returned per library search | `5` |
 
-The web chat backend also honors `PORT`, `AGENT_ENDPOINT`, and `AGENT_MODEL`
+The web chat backend also honors `PORT` and `AGENT_MODEL`
 (see [webchat/server.js](webchat/server.js)). The validator honors `PORT`
 (see [validator/server.js](validator/server.js)).
+
+### Switching between the local and hosted agent
+
+The chat header has an agent selector so you can route requests to either the **local**
+agent or the **deployed Foundry hosted** agent without restarting anything:
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `LOCAL_AGENT_ENDPOINT` | Local agent Responses URL (legacy alias: `AGENT_ENDPOINT`) | `http://localhost:8088/responses` |
+| `REMOTE_AGENT_PROJECT_ENDPOINT` | Foundry project endpoint (`https://<resource>.services.ai.azure.com/api/projects/<project>`) | falls back to `PROJECT_ENDPOINT` |
+| `REMOTE_AGENT_NAME` | Deployed hosted agent name (from [agent.yaml](agent.yaml)) | _(unset → remote disabled)_ |
+| `REMOTE_AGENT_API_VERSION` | Data-plane api-version | `2025-11-15-preview` |
+| `REMOTE_AGENT_ENDPOINT` | Optional full Responses URL override (wins over the two above) | _(unset)_ |
+| `REMOTE_AGENT_SCOPE` | Token scope for the remote agent | `https://ai.azure.com/.default` |
+
+The **local** target needs no auth. The **Foundry (remote)** target is enabled when the web
+chat can build the Responses URL — i.e. a project endpoint (`REMOTE_AGENT_PROJECT_ENDPOINT`
+or `PROJECT_ENDPOINT`) **and** `REMOTE_AGENT_NAME` are set (or you supply an explicit
+`REMOTE_AGENT_ENDPOINT`). The backend then attaches an Azure AD bearer token minted
+via `DefaultAzureCredential` (run `az login` locally). Each target keeps its **own
+conversation thread**, so switching mid-session means the newly selected agent doesn't know
+what the other one built — the on-screen 3D scene is preserved either way, and `/reset`
+clears both threads.
+
+#### Configure the web chat to connect to the remote Foundry agent
+
+1. **Identify your project endpoint and agent name.** You don't need to hand-build the long
+   Responses URL — just provide the two parts and the web chat composes it as
+   `<project-endpoint>/agents/<name>/endpoint/protocols/openai/responses?api-version=<ver>`:
+
+   - **Project endpoint** — `https://<your-foundry-resource>.services.ai.azure.com/api/projects/<project>`
+     (the same `PROJECT_ENDPOINT` the Python agent uses).
+   - **Agent name** — `verbalreality`, from [agent.yaml](agent.yaml).
+
+2. **Set the web chat environment variables.** Add them to your `.env`
+   (or export them in the shell that runs the web chat):
+
+   ```bash
+   # .env  (read by webchat/server.js)
+   # Reuses PROJECT_ENDPOINT automatically; set REMOTE_AGENT_PROJECT_ENDPOINT only to override it.
+   REMOTE_AGENT_NAME=verbalreality
+   # Optional overrides:
+   # REMOTE_AGENT_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
+   # REMOTE_AGENT_API_VERSION=2025-11-15-preview
+   # REMOTE_AGENT_SCOPE=https://ai.azure.com/.default
+   ```
+
+   Leave `LOCAL_AGENT_ENDPOINT` unset to keep the local default, or point it elsewhere if
+   your local agent runs on a non-default port. If you'd rather pin the exact URL, set
+   `REMOTE_AGENT_ENDPOINT` to the full Responses URL — it overrides the composition above.
+
+3. **Authenticate.** The web chat backend mints the bearer token with
+   `DefaultAzureCredential`, so sign in with an identity that has access to the Foundry
+   project:
+
+   ```bash
+   az login
+   ```
+
+   Your identity needs a role that allows invoking the project's agents (e.g. **Azure AI
+   User** / **Azure AI Developer** on the Foundry project). Without it the remote calls
+   return `401`/`403`.
+
+4. **Start (or restart) the web chat** so it picks up the new env vars:
+
+   ```bash
+   cd webchat && npm start
+   ```
+
+   On startup it logs both targets, e.g.
+   `remote agent -> https://…/agents/verbalreality/responses`.
+
+5. **Select the target in the UI.** Open http://localhost:3000 and pick **Foundry (remote)**
+   from the selector in the chat header. (If the option shows *“not configured”*, the server
+   couldn't build the Responses URL — set `REMOTE_AGENT_NAME` and ensure a project endpoint
+   is available (`PROJECT_ENDPOINT` or `REMOTE_AGENT_PROJECT_ENDPOINT`), then restart.)
+
+You can confirm the backend's view at any time:
+
+```bash
+curl -s http://localhost:3000/api/config
+# {"localConfigured":true,"remoteConfigured":true}
+```
+
+If a remote request fails with an auth error, the chat surfaces a message telling you to run
+`az login` or check `REMOTE_AGENT_SCOPE`.
