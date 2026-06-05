@@ -1,4 +1,6 @@
-# Live 3D Explorer
+![Markdown Logo](./VerbalRealityLogo.png "Verbal Reality Logo")
+
+# Verbal Reality
 
 A full-screen Babylon.js canvas (left, 2/3 width) plus a chat panel (right, 1/3) that talks to a
 **Microsoft Foundry hosted agent**. The agent generates Babylon.js JavaScript that is evaluated live
