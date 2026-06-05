@@ -1,0 +1,14 @@
+{
+  "name": "babylon-webchat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web chat client (full-screen Babylon.js canvas + chat) that talks to the Babylon3DAgent Foundry hosted agent.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

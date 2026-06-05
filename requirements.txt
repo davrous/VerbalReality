@@ -1,0 +1,21 @@
+# Canonical Microsoft Foundry hosted-agent stack.
+#
+# We deliberately DO NOT use `azure-ai-agentserver-agentframework` / `AzureAIClient`:
+# that client unconditionally registers a `kind: prompt` agent in the Foundry project,
+# which collides with the hosted agent declared in agent.yaml and crashes every turn
+# with HTTP 400 "Agent kind mismatch". The `FoundryChatClient` + `ResponsesHostServer`
+# pair below never calls `create_version`, so the agent identity stays the single one
+# declared in agent.yaml.
+#
+# foundry-hosting still ships only pre-releases, so install with `--pre`
+# (the .vscode tasks and Dockerfile do this).
+agent-framework>=1.7.0
+agent-framework-foundry-hosting
+
+# Auth + config + the HTTP call the validation tool makes to the Node NullEngine service.
+azure-identity>=1.25.3
+python-dotenv>=1.2.2
+httpx>=0.27
+
+# Local debugging (VS Code Python Debugger / AI Toolkit Agent Inspector).
+debugpy>=1.8.20

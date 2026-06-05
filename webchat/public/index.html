@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live 3D Explorer — Babylon3DAgent</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+    <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <div id="canvas-pane">
+        <canvas id="renderCanvas" touch-action="none"></canvas>
+      </div>
+      <div id="chat-resizer" role="separator" aria-orientation="vertical" title="Drag to resize chat">
+        <span id="chat-resizer-grip"></span>
+      </div>
+      <div id="chat-pane">
+        <header id="chat-header">
+          <h1>Babylon3DAgent</h1>
+          <span id="status-dot" title="agent status"></span>
+        </header>
+        <div id="messages" aria-live="polite"></div>
+        <form id="chat-form" autocomplete="off">
+          <textarea
+            id="chat-input"
+            rows="2"
+            placeholder="Describe the 3D scene to build…  (type /reset to clear)"
+          ></textarea>
+          <button id="send-btn" type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+    <script src="activity.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

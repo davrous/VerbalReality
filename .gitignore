@@ -1,0 +1,13 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS / editor
+.DS_Store

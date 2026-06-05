@@ -1,0 +1,71 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Validate prerequisites",
+      "type": "aitk",
+      "command": "debug-check-prerequisites",
+      "args": {
+        "portOccupancy": [5679, 8088]
+      }
+    },
+    {
+      "label": "Start Validator Service",
+      "type": "shell",
+      "command": "npm start",
+      "isBackground": true,
+      "options": { "cwd": "${workspaceFolder}/validator" },
+      "problemMatcher": {
+        "pattern": [{ "regexp": "^.*$", "file": 0, "location": 1, "message": 2 }],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": "Validator listening|running on"
+        }
+      }
+    },
+    {
+      "label": "Run Agent/Workflow HTTP Server",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m debugpy --listen 127.0.0.1:5679 agent.py",
+      "isBackground": true,
+      "options": { "cwd": "${workspaceFolder}", "env": { "PORT": "8088" } },
+      "dependsOn": ["Validate prerequisites", "Start Validator Service"],
+      "problemMatcher": {
+        "pattern": [{ "regexp": "^.*$", "file": 0, "location": 1, "message": 2 }],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": "Application startup complete|Running on|running on"
+        }
+      }
+    },
+    {
+      "label": "Open Agent Inspector",
+      "type": "shell",
+      "command": "echo '${input:openAgentInspector}'",
+      "presentation": { "reveal": "never" },
+      "dependsOn": ["Run Agent/Workflow HTTP Server"]
+    },
+    {
+      "label": "Terminate All Tasks",
+      "command": "echo ${input:terminate}",
+      "type": "shell",
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "openAgentInspector",
+      "type": "command",
+      "command": "ai-mlstudio.openTestTool",
+      "args": { "triggeredFrom": "tasks", "port": 8088 }
+    },
+    {
+      "id": "terminate",
+      "type": "command",
+      "command": "workbench.action.tasks.terminate",
+      "args": "terminateAll"
+    }
+  ]
+}
