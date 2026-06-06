@@ -29,8 +29,12 @@ environment_variables:
     value: "true"
   - name: VALIDATOR_URL
     value: "http://localhost:8087/validate"
+  # Capture every failing validate_babylon_code attempt (code + error + prompt) to the
+  # micro-VM disk and emit OpenTelemetry error events + structured logs for evaluation.
+  - name: CAPTURE_VALIDATION_FAILURES
+    value: "true"
 dockerfile_path: Dockerfile
 resources:
   # Bumped from 1.0/2.0Gi to fit Python + Node + Babylon.js running together.
-  cpu: '1.0'
-  memory: 2.0Gi
+  cpu: '2.0'
+  memory: 4.0Gi

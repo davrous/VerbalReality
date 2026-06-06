@@ -79,6 +79,42 @@ app.post("/reset", (_req, res) => {
   res.json({ ok: true });
 });
 
+// Register a mesh that was loaded into the BROWSER scene outside of validated code
+// (e.g. when the user clicks a gallery thumbnail, the web client imports the GLB
+// client-side and never sends that code here). Without this, the cumulative validation
+// scene has no such mesh, so a later snippet that references it by name fails with
+// `Mesh "<name>" not found` even though the model is visible in the browser.
+//
+// We create a lightweight empty stub mesh with the given name — no glTF fetch needed.
+// `scene.getMeshByName(name)` / `scene.getNodeByName(name)` then resolve it, which is
+// all the validator needs to let animation/transform snippets validate. Idempotent.
+app.post("/register-mesh", (req, res) => {
+  const name = req.body && req.body.name;
+  if (typeof name !== "string" || name.trim() === "") {
+    log("register-mesh: rejected (no name provided)");
+    return res.status(400).json({ ok: false, error: "No mesh name provided." });
+  }
+  try {
+    const existing = scene.getMeshByName(name);
+    if (existing) {
+      log(`register-mesh: "${name}" already present`);
+      return res.json({ ok: true, created: false });
+    }
+    // An empty BABYLON.Mesh is enough to satisfy name lookups in the sandbox.
+    // Give it a rotationQuaternion like a real imported GLB root so the sandbox mirrors
+    // browser state: snippets that rotate it must use mesh.rotate(...)/quaternion math,
+    // not mesh.rotation.y (which Babylon ignores once a rotationQuaternion is present).
+    const stub = new BABYLON.Mesh(name, scene);
+    stub.rotationQuaternion = BABYLON.Quaternion.Identity();
+    log(`register-mesh: created stub mesh "${name}"`);
+    return res.json({ ok: true, created: true });
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    logError("register-mesh: ERROR -", message);
+    return res.json({ ok: false, error: message });
+  }
+});
+
 app.post("/validate", (req, res) => {
   const code = req.body && req.body.code;
   if (typeof code !== "string" || code.trim() === "") {

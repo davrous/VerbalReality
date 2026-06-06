@@ -49,6 +49,7 @@ RUN pip install --no-cache-dir --pre -r requirements.txt
 
 # --- Application code ---
 COPY agent.py .
+COPY failure_store.py .
 COPY agent.yaml .
 COPY validator/server.js ./validator/server.js
 COPY start.sh .

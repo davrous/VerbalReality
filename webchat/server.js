@@ -125,6 +125,39 @@ function sessionKey(sessionId, target) {
   return `${sessionId}::${target === "remote" ? "remote" : "local"}`;
 }
 
+// Per-session promise chain so two `/api/chat` calls for the same session+target never
+// run concurrently. Without this, a follow-up (e.g. a silent "model loaded" note fired
+// the instant a gallery thumbnail is clicked) can be sent while the previous turn is
+// still streaming — chaining off a `previous_response_id` Foundry hasn't persisted yet,
+// which returns a transient 404. Serializing guarantees we only ever chain off a
+// completed, committed response.
+const sessionChains = new Map();
+
+function serialize(sKey, task) {
+  const prev = sessionChains.get(sKey) || Promise.resolve();
+  const result = prev.then(() => task());
+  // Advance the chain regardless of whether this task succeeds or fails.
+  const chain = result.then(
+    () => {},
+    () => {}
+  );
+  sessionChains.set(sKey, chain);
+  // Drop the entry once this is the last task in the chain, to avoid unbounded growth.
+  chain.then(() => {
+    if (sessionChains.get(sKey) === chain) sessionChains.delete(sKey);
+  });
+  return result;
+}
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// True when an upstream 404 is specifically about the chained previous_response_id not
+// being found (Foundry hasn't finished persisting it yet) — the recoverable case.
+function isMissingPreviousResponse(status, raw, previousResponseId) {
+  if (status !== 404 || !previousResponseId) return false;
+  return /not[_ ]?found/i.test(raw || "");
+}
+
 // Extract plain text from an OpenAI Responses API payload across known shapes.
 function extractText(payload) {
   if (!payload) return "";
@@ -156,8 +189,10 @@ function handleUpstreamEvent(evt, res, sKey, state) {
   if (!evt || typeof evt !== "object") return null;
   const type = evt.type || "";
 
-  // Capture the response id as early as possible for multi-turn continuity.
-  if (evt.response && evt.response.id) sessions.set(sKey, evt.response.id);
+  // Track the response id as it appears, but DON'T commit it to the session yet: a
+  // follow-up that chains off an id Foundry hasn't finished persisting gets a transient
+  // 404. We only commit once the response is finalized (see response.completed below).
+  if (evt.response && evt.response.id) state.responseId = evt.response.id;
 
   if (type.endsWith("output_text.delta") && typeof evt.delta === "string") {
     state.text += evt.delta;
@@ -183,6 +218,9 @@ function handleUpstreamEvent(evt, res, sKey, state) {
   }
 
   if (type === "response.completed" || type === "response.incomplete") {
+    // The response is now persisted on Foundry's side, so it's safe to chain the next
+    // turn off it. Commit the id captured during streaming.
+    if (state.responseId) sessions.set(sKey, state.responseId);
     const reply = (evt.response && extractText(evt.response)) || state.text || "";
     return reply;
   }
@@ -225,52 +263,88 @@ app.post("/api/chat", async (req, res) => {
   });
 
   const sKey = sessionKey(sessionId, target);
-  const body = {
-    model: AGENT_MODEL,
-    input: message,
-    stream: true,
-  };
-  const previousResponseId = sessions.get(sKey);
-  if (previousResponseId) body.previous_response_id = previousResponseId;
 
-  const state = { text: "", errored: false, seenToolItems: new Set() };
+  // Serialize turns for this session so a follow-up never chains off an in-flight,
+  // not-yet-persisted previous_response_id (the cause of transient Foundry 404s).
+  return serialize(sKey, () =>
+    runChatTurn({ res, endpoint, target, sKey, message })
+  );
+});
 
+// Issue one POST /responses to the upstream agent, retrying when the chained
+// previous_response_id is briefly missing on Foundry's side, then stream the SSE
+// response back to the browser. Resolves when the turn is fully handled (res.end called).
+async function runChatTurn({ res, endpoint, target, sKey, message }) {
+  const state = { text: "", errored: false, seenToolItems: new Set(), responseId: null };
+
+  let headers;
   try {
-    const headers = {
+    headers = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     };
     // The deployed Foundry hosted agent requires an Azure AD bearer token; the local
     // agent needs none.
     if (target === "remote") {
-      try {
-        headers.Authorization = await getRemoteAuthHeader();
-      } catch (authErr) {
-        sendEvent(res, {
-          type: "error",
-          error: `Could not authenticate to the remote agent: ${
-            authErr.message || authErr
-          }. Run 'az login' or check REMOTE_AGENT_SCOPE.`,
-        });
-        return res.end();
-      }
+      headers.Authorization = await getRemoteAuthHeader();
     }
-
-    const upstream = await fetch(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
+  } catch (authErr) {
+    sendEvent(res, {
+      type: "error",
+      error: `Could not authenticate to the remote agent: ${
+        authErr.message || authErr
+      }. Run 'az login' or check REMOTE_AGENT_SCOPE.`,
     });
+    return res.end();
+  }
 
-    if (!upstream.ok) {
+  // Backoff schedule (ms) for retrying the SAME chained id when Foundry returns a
+  // transient "previous response not found" 404. After these, we retry once WITHOUT the
+  // chain so the user still gets a reply instead of an error bubble.
+  const RETRY_BACKOFFS = [400, 800];
+  let previousResponseId = sessions.get(sKey);
+
+  let upstream;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const body = { model: AGENT_MODEL, input: message, stream: true };
+      if (previousResponseId) body.previous_response_id = previousResponseId;
+
+      upstream = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+
+      if (upstream.ok) break;
+
       const raw = await upstream.text();
+      if (isMissingPreviousResponse(upstream.status, raw, previousResponseId)) {
+        if (attempt < RETRY_BACKOFFS.length) {
+          await delay(RETRY_BACKOFFS[attempt]);
+          continue; // retry with the same previous_response_id
+        }
+        // Still not found after backing off: drop the chain and try once more fresh.
+        previousResponseId = null;
+        continue;
+      }
+
+      // Non-recoverable upstream error.
       sendEvent(res, {
         type: "error",
         error: `Agent error (${upstream.status}): ${raw}`,
       });
       return res.end();
     }
+  } catch (err) {
+    sendEvent(res, {
+      type: "error",
+      error: `Could not reach agent: ${err.message || err}`,
+    });
+    return res.end();
+  }
 
+  try {
     const contentType = upstream.headers.get("content-type") || "";
 
     // Fallback: the agent answered with a single JSON payload instead of a stream.
@@ -336,7 +410,8 @@ app.post("/api/chat", async (req, res) => {
     });
     return res.end();
   }
-});
+}
+
 
 // Tell the front-end which targets are available so it can enable/disable the switch.
 app.get("/api/config", (req, res) => {

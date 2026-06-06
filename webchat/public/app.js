@@ -14,6 +14,21 @@
   const canvas = document.getElementById("renderCanvas");
   let engine, scene, camera;
 
+  // On macOS, a trackpad pinch is delivered as a `wheel` event with `ctrlKey=true`
+  // (and Safari additionally fires `gesture*` events). Browsers interpret those as
+  // page zoom, which fights with — and overrides — the camera's own zoom. Swallowing
+  // the default on the canvas keeps the pinch wired exclusively to the Babylon camera.
+  canvas.addEventListener(
+    "wheel",
+    (e) => {
+      if (e.ctrlKey) e.preventDefault();
+    },
+    { passive: false }
+  );
+  ["gesturestart", "gesturechange", "gestureend"].forEach((type) =>
+    canvas.addEventListener(type, (e) => e.preventDefault(), { passive: false })
+  );
+
   function buildScene() {
     scene = new BABYLON.Scene(engine);
     scene.clearColor = new BABYLON.Color4(0.043, 0.063, 0.125, 1);
@@ -248,7 +263,10 @@
       "named \"" +
       name +
       "\" and the model is ALREADY loaded — do NOT output or validate any code for " +
-      "this. Reply with a brief one-line confirmation, and remember \"" +
+      "this. If you have a register_loaded_mesh tool, call it now with name \"" +
+      name +
+      "\" so the validation sandbox mirrors this browser-side load. Then reply with a " +
+      "brief one-line confirmation, and remember \"" +
       name +
       "\" so you can reference it in later requests (e.g. scaling, moving, animating it).";
     await sendMessage(note, {
@@ -394,7 +412,22 @@
     return el;
   }
 
-  async function sendMessage(message, opts) {
+  // Serializes turns on the client so a gallery thumbnail click (which fires a silent
+  // context note immediately) can't overlap an in-flight turn. The server also serializes
+  // per session, but queuing here gives cleaner UX and avoids racing requests entirely.
+  let turnChain = Promise.resolve();
+
+  function sendMessage(message, opts) {
+    const run = turnChain.then(() => sendMessageImpl(message, opts));
+    // Advance the chain whether or not this turn succeeds.
+    turnChain = run.then(
+      () => {},
+      () => {}
+    );
+    return run;
+  }
+
+  async function sendMessageImpl(message, opts) {
     const options = opts || {};
     // userBubbleText === null suppresses the user bubble (used for silent context
     // notes the UI has already represented some other way, e.g. a gallery click).
