@@ -14,6 +14,39 @@
   const canvas = document.getElementById("renderCanvas");
   let engine, scene, camera;
 
+  // ---------------------------------------------------------------------------
+  // Havok physics — initialized once and pre-enabled on every (re)built scene so
+  // that agent snippets can add PhysicsAggregate / PhysicsBody synchronously. The
+  // wasm engine is loaded via the HavokPhysics_umd.js CDN script in index.html,
+  // which exposes the global `HavokPhysics()` factory. The cached instance is
+  // reused across scene resets (a fresh HavokPlugin is created per scene).
+  const GRAVITY = new BABYLON.Vector3(0, -9.81, 0);
+  let havokInstance = null;
+  const havokReady =
+    typeof HavokPhysics === "function"
+      ? HavokPhysics()
+          .then((hk) => {
+            havokInstance = hk;
+            // The scene may already be built before the wasm finished loading; if
+            // so, enable physics on it now so the very first turn can use bodies.
+            if (scene) enablePhysics(scene);
+          })
+          .catch((err) => {
+            console.error("Havok physics failed to initialize:", err);
+          })
+      : Promise.resolve();
+
+  // Enable Havok physics on a scene if it is ready and not already enabled.
+  function enablePhysics(targetScene) {
+    if (!havokInstance || !targetScene) return;
+    if (targetScene.getPhysicsEngine()) return;
+    try {
+      targetScene.enablePhysics(GRAVITY, new BABYLON.HavokPlugin(true, havokInstance));
+    } catch (err) {
+      console.error("Failed to enable Havok physics on scene:", err);
+    }
+  }
+
   // On macOS, a trackpad pinch is delivered as a `wheel` event with `ctrlKey=true`
   // (and Safari additionally fires `gesture*` events). Browsers interpret those as
   // page zoom, which fights with — and overrides — the camera's own zoom. Swallowing
@@ -45,6 +78,9 @@
     camera.wheelPrecision = 30;
 
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+
+    // Pre-enable Havok physics so generated snippets can add bodies synchronously.
+    enablePhysics(scene);
 
     // Bind the in-canvas activity indicators to the (re)built scene.
     if (window.ActivityIndicators) {

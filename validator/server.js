@@ -14,8 +14,33 @@
 
 import express from "express";
 import * as BABYLON from "@babylonjs/core";
+import HavokPhysics from "@babylonjs/havok";
+import { createRequire } from "module";
+import { readFileSync } from "fs";
+import { dirname, join } from "path";
 
 const PORT = process.env.PORT || 8087;
+
+// Gravity used when enabling physics. Mirrors the browser (webchat/public/app.js).
+const GRAVITY = new BABYLON.Vector3(0, -9.81, 0);
+
+// The Havok wasm instance is expensive to create, so it is initialized once and
+// reused across scene rebuilds (/reset). A fresh HavokPlugin is created per scene.
+let havokInstance = null;
+
+async function initHavok() {
+  if (!havokInstance) {
+    // The Havok wasm loader uses `fetch()` to pull the .wasm file, which is not
+    // supported for the file:// scheme under Node. Read the wasm bytes from the
+    // installed package and pass them in as `wasmBinary` so no fetch is attempted.
+    const require = createRequire(import.meta.url);
+    const havokEntry = require.resolve("@babylonjs/havok");
+    const wasmBinary = readFileSync(join(dirname(havokEntry), "HavokPhysics.wasm"));
+    havokInstance = await HavokPhysics({ wasmBinary });
+    log("Havok physics engine initialized");
+  }
+  return havokInstance;
+}
 
 // ---------------------------------------------------------------------------
 // Lightweight terminal tracing (no extra dependencies).
@@ -48,9 +73,14 @@ function createScene() {
     scene
   );
   new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
-}
 
-createScene();
+  // Pre-enable Havok physics so snippets that add PhysicsAggregate / PhysicsBody
+  // validate, mirroring the browser scene (webchat/public/app.js). initHavok()
+  // must have run already (it is awaited on startup and in /reset).
+  if (havokInstance && !scene.getPhysicsEngine()) {
+    scene.enablePhysics(GRAVITY, new BABYLON.HavokPlugin(true, havokInstance));
+  }
+}
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -157,6 +187,11 @@ app.post("/validate", (req, res) => {
     return res.json({ ok: false, error: message });
   }
 });
+
+// Initialize Havok once, build the first scene, then start accepting requests so
+// that /health (which start.sh waits on) only succeeds once physics is ready.
+await initHavok();
+createScene();
 
 app.listen(PORT, () => {
   log(`Validator listening on http://localhost:${PORT}`);

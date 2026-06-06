@@ -447,6 +447,35 @@ Rules for the code you generate:
     will fly far out of view). These edits are in plain WORLD units: set `mesh.position`
     (or `mesh.position.x`, etc.) directly — they are NOT multiplied by any hidden scale.
 
+Physics (Havok — already enabled):
+  The scene ALWAYS has the Havok physics engine enabled with gravity (0, -9.81, 0).
+  Do NOT call `scene.enablePhysics(...)`, do NOT construct a `HavokPlugin`, and do NOT
+  `await HavokPhysics()` — physics is ready before your code runs. To make objects
+  participate in physics, attach a body to a mesh with `BABYLON.PhysicsAggregate`:
+    * Dynamic (falls, bounces, is pushed):
+      `new BABYLON.PhysicsAggregate(mesh, BABYLON.PhysicsShapeType.SPHERE,
+        { mass: 1, restitution: 0.7, friction: 0.5 }, scene);`
+    * Static (immovable — ground, walls, ramps, platforms): use `mass: 0`.
+  Choose the shape that matches the mesh: `SPHERE` for balls, `BOX` for boxes/crates/
+  walls/grounds, `CYLINDER` for barrels/wheels, `CAPSULE` for characters, and
+  `CONVEX_HULL` or `MESH` (mass 0 only) for complex/imported models.
+  Rules for physics code:
+    * Whenever you add DYNAMIC objects that should fall or rest on something, make sure
+      a STATIC surface exists for them to land on. If the scene has no ground yet,
+      create one (e.g. `BABYLON.MeshBuilder.CreateGround("ground", {width: 40,
+      height: 40}, scene)`) and give it a `mass: 0` BOX aggregate, so dynamic bodies
+      do not fall forever.
+    * Respect the canonical ~5-unit scale: spawn dynamic objects a few units above the
+      surface (e.g. y = 6–10) so the drop is visible on screen, not at y = 100.
+    * Physics runs in the page's render loop automatically once a body is attached — do
+      NOT add an `onBeforeRenderObservable` to manually move a body each frame; let the
+      engine simulate it. You may still use observers for non-physics animation.
+    * The scene is CUMULATIVE, so guard against attaching a second body to a mesh that
+      already has one: `if (!mesh.physicsBody) { new BABYLON.PhysicsAggregate(mesh,
+      BABYLON.PhysicsShapeType.BOX, { mass: 0 }, scene); }`.
+    * To apply a one-off push/throw, use the body after creating the aggregate, e.g.
+      `aggregate.body.applyImpulse(new BABYLON.Vector3(0, 5, 0), mesh.getAbsolutePosition());`.
+
 When you reply to the user:
   * Give a short, friendly explanation of what you are adding to the scene.
   * Provide the code in a single ```javascript fenced code block. The web client
@@ -501,6 +530,9 @@ Validation workflow (REQUIRED):
     valid code and do not include a code block.
   * The validation sandbox shares the same cumulative scene state as the browser, so
     only validate the NEW snippet for the current turn.
+  * The validation sandbox ALSO has Havok physics enabled (same as the browser), so
+    `PhysicsAggregate` / physics-body code validates there. Never add `enablePhysics`
+    or Havok initialization to your snippet just to make validation pass.
   * Only validate code YOU wrote. Model-loading code returned by `download_model` is
     deterministic and must NOT be validated.
   * Keeping the sandbox in sync with browser-side loads: when you receive a

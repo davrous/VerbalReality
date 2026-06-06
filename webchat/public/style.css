@@ -26,16 +26,14 @@ body {
   position: relative;
 }
 
-/* Branding logo overlaid on the bottom-left of the 3D canvas */
+/* Branding head logo in the header, to the right of the wordmark. */
 #app-logo {
-  position: absolute;
-  bottom: 16px;
-  left: 16px;
-  width: 256px;
-  height: auto;
+  flex: 0 0 auto;
+  height: 32px;
+  width: auto;
+  margin-left: 8px;
   pointer-events: none;
   user-select: none;
-  z-index: 4;
 }
 
 /* Draggable divider between the canvas and the chat panel */
@@ -112,6 +110,15 @@ body.resizing {
   font-size: 16px;
   margin: 0;
   font-weight: 600;
+  display: flex;
+  align-items: center;
+}
+
+#chat-wordmark {
+  display: block;
+  height: 24px;
+  width: auto;
+  user-select: none;
 }
 
 #agent-target-label {

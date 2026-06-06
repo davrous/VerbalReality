@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Verbal Reality — a Babylon 3D Agent</title>
     <link rel="stylesheet" href="style.css" />
+    <script src="https://cdn.babylonjs.com/havok/HavokPhysics_umd.js"></script>
     <script src="https://cdn.babylonjs.com/babylon.js"></script>
     <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
     <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
@@ -13,14 +14,16 @@
     <div id="app">
       <div id="canvas-pane">
         <canvas id="renderCanvas" touch-action="none"></canvas>
-        <img id="app-logo" src="VerbalRealityLogo.png" alt="Verbal Reality logo" />
       </div>
       <div id="chat-resizer" role="separator" aria-orientation="vertical" title="Drag to resize chat">
         <span id="chat-resizer-grip"></span>
       </div>
       <div id="chat-pane">
         <header id="chat-header">
-          <h1>Verbal Reality</h1>
+          <h1>
+            <img id="chat-wordmark" src="VerbalRealityWordmark.png" alt="Verbal Reality" />
+          </h1>
+          <img id="app-logo" src="VerbalRealityHead.png" alt="Verbal Reality logo" />
           <label id="agent-target-label" for="agent-target" title="Choose which agent answers">
             <select id="agent-target" aria-label="Agent target">
               <option value="local" selected>Local agent</option>
