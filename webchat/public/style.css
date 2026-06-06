@@ -330,6 +330,11 @@ body.resizing {
   word-break: break-word;
 }
 
+/* Texture swatches look better filling the tile than letterboxed. */
+.texture-card img {
+  object-fit: cover;
+}
+
 #chat-form {
   display: flex;
   gap: 8px;

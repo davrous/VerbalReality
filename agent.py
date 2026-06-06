@@ -126,6 +126,16 @@ MODEL_SEARCH_URL = os.environ.get(
 # How many models to return per search (matches the reference JARVIB experience).
 MODEL_SEARCH_PAGE_SIZE = int(os.environ.get("MODEL_SEARCH_PAGE_SIZE", "5"))
 
+# Poly Haven public asset API (https://polyhaven.com). Used to search free PBR
+# textures and resolve their per-map download URLs (albedo / normal / roughness / …).
+# Same source the reference Blender agent uses (github.com/davrous/blenderagent).
+POLYHAVEN_API = os.environ.get("POLYHAVEN_API", "https://api.polyhaven.com").rstrip("/")
+# How many texture thumbnails to surface per search.
+TEXTURE_SEARCH_PAGE_SIZE = int(os.environ.get("TEXTURE_SEARCH_PAGE_SIZE", "6"))
+# Default texture resolution to download when the user does not ask for a specific one.
+# Poly Haven offers 1k / 2k / 4k / 8k; 2k is a good quality/size balance for the web.
+TEXTURE_DEFAULT_RESOLUTION = os.environ.get("TEXTURE_DEFAULT_RESOLUTION", "2k")
+
 
 def _capture_validation_failure(code: str, error: str) -> None:
     """Persist + trace a single validation failure. Best-effort: never raises.
@@ -398,6 +408,217 @@ async def download_model(
     return code
 
 
+def _score_texture(asset_id: str, meta: dict, tokens: list[str]) -> int:
+    """Rank a Poly Haven texture asset against the search tokens.
+
+    Higher weight for hits in the human name / id, then categories, then tags. A
+    substring hit scores less than an exact token hit so e.g. "rock" prefers the
+    `rock` category over an asset merely tagged "rocky".
+    """
+    name_hay = f"{meta.get('name', '')} {asset_id}".lower()
+    tags = [str(t).lower() for t in (meta.get("tags") or [])]
+    cats = [str(c).lower() for c in (meta.get("categories") or [])]
+    score = 0
+    for tok in tokens:
+        if tok in name_hay:
+            score += 3
+        if tok in cats:
+            score += 2
+        elif any(tok in c for c in cats):
+            score += 1
+        if tok in tags:
+            score += 2
+        elif any(tok in t for t in tags):
+            score += 1
+    return score
+
+
+@tool(approval_mode="never_require")
+async def list_available_textures(
+    query: Annotated[
+        str,
+        "What kind of surface texture to look for, e.g. 'red brick', 'mossy rock', "
+        "'wood planks', 'concrete', 'sand'. A short descriptive phrase works best.",
+    ],
+) -> str:
+    """Search the Poly Haven library for free PBR surface textures.
+
+    Returns a JSON array (as a string) of up to a few textures, each shaped like
+    {"name": str, "imageUrl": str, "assetId": str}:
+      * imageUrl is a thumbnail preview the web client shows in the chat.
+      * assetId is the Poly Haven id to pass to `apply_texture` when the user picks one
+        and chooses a mesh to apply it to.
+    Returns "[]" when nothing matches, or a string starting with "ERROR:" on failure.
+    """
+    print(f"[agent] tool list_available_textures: query={query!r}", flush=True)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"{POLYHAVEN_API}/assets", params={"t": "textures"})
+            response.raise_for_status()
+            assets = response.json()
+    except Exception as exc:  # noqa: BLE001 - surface any transport error to the model
+        print(f"[agent] tool list_available_textures: transport error ({exc})", flush=True)
+        return f"ERROR: could not reach the Poly Haven library ({exc})."
+
+    if not isinstance(assets, dict):
+        return "ERROR: unexpected response from the Poly Haven library."
+
+    tokens = [t for t in query.lower().split() if t]
+    scored: list[tuple[int, str, dict]] = []
+    for asset_id, meta in assets.items():
+        if not isinstance(meta, dict):
+            continue
+        score = _score_texture(asset_id, meta, tokens) if tokens else 0
+        if score > 0:
+            scored.append((score, asset_id, meta))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    textures: list[dict[str, str]] = []
+    for _score, asset_id, meta in scored[:TEXTURE_SEARCH_PAGE_SIZE]:
+        thumb = meta.get("thumbnail_url") or (
+            f"https://cdn.polyhaven.com/asset_img/thumbs/{asset_id}.png?width=256&height=256"
+        )
+        textures.append(
+            {
+                "name": meta.get("name") or asset_id,
+                "imageUrl": thumb,
+                "assetId": asset_id,
+            }
+        )
+
+    print(f"[agent] tool list_available_textures: {len(textures)} texture(s) found", flush=True)
+    return json.dumps(textures)
+
+
+@tool(approval_mode="never_require")
+async def apply_texture(
+    asset_id: Annotated[
+        str,
+        "The Poly Haven texture id (assetId) to apply, taken from a previous "
+        "list_available_textures result, e.g. 'brick_wall_006'.",
+    ],
+    mesh_name: Annotated[
+        str,
+        "The name of the mesh in the scene to apply the texture to (e.g. 'ground', "
+        "'wall1', 'red_chair'). The texture is also applied to that mesh's child "
+        "meshes so it works for imported models too.",
+    ],
+    resolution: Annotated[
+        str,
+        "Texture resolution to download: '1k', '2k', '4k' or '8k'. Use '2k' unless the "
+        "user asks for sharper/heavier ('4k', '8k') or lighter ('1k') textures.",
+    ] = TEXTURE_DEFAULT_RESOLUTION,
+    tiling: Annotated[
+        float,
+        "How many times the texture repeats across the surface (uScale/vScale). Use 1 "
+        "for a single stretched copy, or a higher value (e.g. 4, 8) to tile a small "
+        "texture across a large surface like a ground or wall.",
+    ] = 1.0,
+) -> str:
+    """Build the Babylon.js snippet that applies a Poly Haven PBR texture to a mesh.
+
+    Resolves the texture's per-map download URLs (albedo, normal, and roughness/AO/
+    metalness) from Poly Haven, then returns runnable Babylon.js code (no markdown) that
+    creates a `BABYLON.PBRMaterial`, wires those maps in, tiles it by `tiling` and assigns
+    it to the mesh named `mesh_name` (and its children). The code is deterministic, so it
+    does NOT need to be validated — put it straight into the ```javascript block of your
+    reply. Returns a string starting with "ERROR:" if the texture cannot be resolved.
+    """
+    resolution = (resolution or TEXTURE_DEFAULT_RESOLUTION).lower()
+    print(
+        f"[agent] tool apply_texture: asset={asset_id!r} mesh={mesh_name!r} "
+        f"res={resolution} tiling={tiling}",
+        flush=True,
+    )
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"{POLYHAVEN_API}/files/{asset_id}")
+            response.raise_for_status()
+            files = response.json()
+    except Exception as exc:  # noqa: BLE001 - surface any transport error to the model
+        print(f"[agent] tool apply_texture: transport error ({exc})", flush=True)
+        return f"ERROR: could not reach Poly Haven for texture '{asset_id}' ({exc})."
+
+    if not isinstance(files, dict):
+        return f"ERROR: unexpected file listing for texture '{asset_id}'."
+
+    files_lower = {str(k).lower(): v for k, v in files.items()}
+
+    def url_for(keys: list[str]) -> str | None:
+        """Pick the first available map URL, preferring the requested resolution + jpg."""
+        for key in keys:
+            node = files_lower.get(key.lower())
+            if not isinstance(node, dict):
+                continue
+            res_node = node.get(resolution) or node.get("2k") or node.get("1k")
+            if not isinstance(res_node, dict):
+                continue
+            fmt_node = res_node.get("jpg") or res_node.get("png")
+            if isinstance(fmt_node, dict) and fmt_node.get("url"):
+                return str(fmt_node["url"])
+        return None
+
+    diffuse = url_for(["Diffuse", "diff", "albedo", "col"])
+    if not diffuse:
+        return f"ERROR: texture '{asset_id}' has no color map available."
+    normal = url_for(["nor_gl", "nor_dx", "Normal"])
+    arm = url_for(["arm"])
+    rough = url_for(["Rough", "rough", "Roughness"])
+    ao = url_for(["AO", "ao"])
+
+    mat_name = f"ph_{asset_id}"
+    lines = [
+        "(function () {",
+        f"  var mat = new BABYLON.PBRMaterial({json.dumps(mat_name)}, scene);",
+        f"  var T = {float(tiling)};",
+        "  function tex(url) {",
+        "    var t = new BABYLON.Texture(url, scene);",
+        "    t.uScale = T; t.vScale = T;",
+        "    return t;",
+        "  }",
+        f"  mat.albedoTexture = tex({json.dumps(diffuse)});",
+    ]
+    if normal:
+        lines.append(f"  mat.bumpTexture = tex({json.dumps(normal)});")
+    if arm:
+        # Poly Haven 'arm' packs AO (R), Roughness (G), Metalness (B) — exactly the
+        # channel layout Babylon's metallicTexture expects.
+        lines += [
+            f"  mat.metallicTexture = tex({json.dumps(arm)});",
+            "  mat.useAmbientOcclusionFromMetallicTextureRed = true;",
+            "  mat.useRoughnessFromMetallicTextureGreen = true;",
+            "  mat.useMetallnessFromMetallicTextureBlue = true;",
+            "  mat.metallic = 1.0;",
+            "  mat.roughness = 1.0;",
+        ]
+    else:
+        if rough:
+            # A standalone roughness map is grayscale, so its green channel carries the
+            # roughness; read it from there and keep the surface non-metallic.
+            lines += [
+                f"  mat.metallicTexture = tex({json.dumps(rough)});",
+                "  mat.useRoughnessFromMetallicTextureGreen = true;",
+                "  mat.metallic = 0.0;",
+                "  mat.roughness = 1.0;",
+            ]
+        else:
+            lines += [
+                "  mat.metallic = 0.0;",
+                "  mat.roughness = 0.85;",
+            ]
+        if ao:
+            lines.append(f"  mat.ambientTexture = tex({json.dumps(ao)});")
+    lines += [
+        f"  var mesh = scene.getMeshByName({json.dumps(mesh_name)});",
+        "  if (mesh) {",
+        "    mesh.material = mat;",
+        "    mesh.getChildMeshes().forEach(function (c) { c.material = mat; });",
+        "  }",
+        "})();",
+    ]
+    return "\n".join(lines)
+
+
 BASE_INSTRUCTIONS = """\
 You are Babylon3DAgent, an assistant that builds interactive 3D worlds by writing
 Babylon.js (https://www.babylonjs.com) JavaScript code.
@@ -516,6 +737,40 @@ Loading real 3D models from the library:
     * Imported models carry a `rotationQuaternion`, so to rotate/spin one you MUST use
       `mesh.rotate(BABYLON.Axis.Y, 0.01, BABYLON.Space.LOCAL)` (see the animation rules
       above). `mesh.rotation.y += …` will appear to do nothing on a loaded model.
+
+Applying real-world textures from Poly Haven:
+  You also have two tools to dress existing meshes with free PBR surface textures
+  (brick, wood, rock, concrete, fabric, sand, …) from the Poly Haven library:
+    * `list_available_textures(query)` — search the library. It returns a JSON array of
+      textures, each with `name`, `imageUrl` (a thumbnail) and `assetId`.
+    * `apply_texture(asset_id, mesh_name, resolution, tiling)` — returns the Babylon.js
+      code that builds a PBRMaterial from that texture and assigns it to a named mesh.
+
+  Workflow:
+    * When the user wants to find or browse textures ("find a brick texture", "show me
+      some wood surfaces", "what rock textures are there?"), call
+      `list_available_textures`. Then, in your reply, include the tool's JSON array
+      VERBATIM inside a single fenced block tagged ```textures (NOT ```javascript and NOT
+      ```models). The web client renders those thumbnails as a gallery in the chat. Add a
+      short friendly sentence before the block, and do NOT also write Babylon.js code in
+      this turn — just present the gallery.
+    * Example reply shape:
+        Here are a few brick textures I found:
+        ```textures
+        [{"name":"Brick Wall 006","imageUrl":"https://…","assetId":"brick_wall_006"}]
+        ```
+    * When the user then picks one AND tells you which mesh to texture ("put the first
+      brick on the wall", "apply that rock to the ground"), call `apply_texture` with the
+      chosen `assetId`, the target `mesh_name`, a `resolution` ('2k' unless they ask
+      sharper/lighter) and a `tiling` (1 normally; use 4–8 to repeat a small texture
+      across a large ground or wall). Put the code it returns into a single ```javascript
+      block so the browser applies it. This texture code is deterministic — do NOT
+      validate it.
+    * If the user picks a texture but has not said which mesh to apply it to, ASK which
+      mesh before calling `apply_texture`.
+    * If `list_available_textures` returns "[]", tell the user nothing matched and suggest
+      a different search term. If a tool returns an "ERROR:…" string, briefly apologize
+      and do not include a ```textures or ```javascript block for it.
 """
 
 VALIDATION_INSTRUCTIONS = """\
@@ -533,8 +788,8 @@ Validation workflow (REQUIRED):
   * The validation sandbox ALSO has Havok physics enabled (same as the browser), so
     `PhysicsAggregate` / physics-body code validates there. Never add `enablePhysics`
     or Havok initialization to your snippet just to make validation pass.
-  * Only validate code YOU wrote. Model-loading code returned by `download_model` is
-    deterministic and must NOT be validated.
+  * Only validate code YOU wrote. Model-loading code returned by `download_model` and
+    texture code returned by `apply_texture` are deterministic and must NOT be validated.
   * Keeping the sandbox in sync with browser-side loads: when you receive a
     `[scene event]` note saying the user loaded a model by clicking a gallery thumbnail,
     the model was imported in the BROWSER only — the validation sandbox does not know
@@ -636,7 +891,13 @@ def create_agent(client: FoundryChatClient) -> Agent:
     disabled so the Foundry service does not persist server-side conversation state —
     the web client drives multi-turn continuity via `previous_response_id`.
     """
-    tools = [list_available_models, download_model, list_validation_failures]
+    tools = [
+        list_available_models,
+        download_model,
+        list_available_textures,
+        apply_texture,
+        list_validation_failures,
+    ]
     if _validation_enabled():
         tools.append(validate_babylon_code)
         tools.append(register_loaded_mesh)

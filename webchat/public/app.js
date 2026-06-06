@@ -203,6 +203,34 @@
     return models;
   }
 
+  // Extract ```textures fenced blocks and parse each as a JSON array of
+  // { name, imageUrl, assetId }. The agent emits the list_available_textures tool
+  // output verbatim inside such a block so we can render the thumbnails as a gallery.
+  function extractTextureBlocks(text) {
+    const textures = [];
+    const re = /```textures\s*\n([\s\S]*?)```/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      let parsed;
+      try {
+        parsed = JSON.parse(m[1].trim());
+      } catch (_) {
+        continue;
+      }
+      if (!Array.isArray(parsed)) continue;
+      for (const item of parsed) {
+        if (item && item.imageUrl && item.name) {
+          textures.push({
+            name: String(item.name),
+            imageUrl: String(item.imageUrl),
+            assetId: item.assetId ? String(item.assetId) : "",
+          });
+        }
+      }
+    }
+    return textures;
+  }
+
   // ---------------------------------------------------------------------------
   // Chat UI
   // ---------------------------------------------------------------------------
@@ -312,6 +340,27 @@
     });
   }
 
+  // Handle a texture thumbnail click. A texture needs a target mesh, which the gallery
+  // doesn't know, so instead of applying it directly we send the agent a silent note
+  // asking it to call `apply_texture` for the chosen texture — picking the best existing
+  // mesh, or asking the user which mesh if it's ambiguous.
+  async function applyTextureFromGallery(assetId, name) {
+    addMessage("system", "Selected texture “" + name + "”.");
+    const note =
+      "[scene event] The user clicked the Poly Haven texture \"" +
+      name +
+      "\" (assetId \"" +
+      assetId +
+      "\") in the gallery. Apply it with the apply_texture tool to the most relevant " +
+      "existing mesh in the scene; if it is ambiguous which mesh they mean, ask them " +
+      "which mesh to texture before applying. Do NOT re-list textures for this.";
+    await sendMessage(note, {
+      userBubbleText: null,
+      runCode: true,
+      initialActivity: "\uD83C\uDFA8 Applying the texture…",
+    });
+  }
+
   // Build a thumbnail gallery for the models the agent surfaced. The parsed `modelUrl`
   // is stashed on each card (data attribute) so a future VR/canvas selector can reuse
   // it without another round-trip to the agent. Clicking a card loads it immediately.
@@ -353,10 +402,52 @@
     return gallery;
   }
 
+  // Build a thumbnail gallery for the Poly Haven textures the agent surfaced. Clicking a
+  // card asks the agent (over the same conversation) to apply that texture to a mesh, so
+  // the `assetId` is stashed on the card for the click handler.
+  function buildTextureGallery(textures) {
+    const gallery = document.createElement("div");
+    gallery.className = "model-gallery texture-gallery";
+    for (const texture of textures) {
+      const card = document.createElement("figure");
+      card.className = "model-card texture-card";
+      card.dataset.textureName = texture.name;
+      if (texture.assetId) {
+        card.dataset.assetId = texture.assetId;
+        card.classList.add("loadable");
+        card.title = "Click to apply “" + texture.name + "” to a mesh";
+        card.setAttribute("role", "button");
+        card.tabIndex = 0;
+        const apply = () => applyTextureFromGallery(texture.assetId, texture.name);
+        card.addEventListener("click", apply);
+        card.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            apply();
+          }
+        });
+      }
+
+      const img = document.createElement("img");
+      img.src = texture.imageUrl;
+      img.alt = texture.name;
+      img.loading = "lazy";
+
+      const caption = document.createElement("figcaption");
+      caption.textContent = texture.name;
+
+      card.appendChild(img);
+      card.appendChild(caption);
+      gallery.appendChild(card);
+    }
+    return gallery;
+  }
+
   // (Re)fill a message element's content: prose plus any extracted code blocks.
   function fillMessage(el, text, codeBlocks) {
     el.textContent = "";
     const models = extractModelBlocks(text);
+    const textures = extractTextureBlocks(text);
     if (codeBlocks && codeBlocks.length) {
       const prose = stripFencedBlocks(text);
       if (prose) {
@@ -371,7 +462,7 @@
         pre.appendChild(codeEl);
         el.appendChild(pre);
       }
-    } else if (models.length) {
+    } else if (models.length || textures.length) {
       const prose = stripFencedBlocks(text);
       if (prose) {
         const p = document.createElement("div");
@@ -381,8 +472,9 @@
     } else {
       el.textContent = text;
     }
-    // Always render the gallery (when present) after the prose.
+    // Always render the galleries (when present) after the prose.
     if (models.length) el.appendChild(buildModelGallery(models));
+    if (textures.length) el.appendChild(buildTextureGallery(textures));
   }
 
   // Remove every fenced block (```javascript, ```models, …) from the text so only the

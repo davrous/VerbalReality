@@ -5,7 +5,8 @@
 A full-screen Babylon.js canvas (left, 2/3 width) plus a chat panel (right, 1/3) that talks to a
 **Microsoft Foundry hosted agent**. The agent turns natural language into Babylon.js JavaScript that
 is evaluated live in the canvas, building up a **cumulative** 3D scene one turn at a time. It can also
-browse a library of ready-made GLB models and drop them into the scene.
+browse a library of ready-made GLB models and drop them into the scene, and dress meshes with free
+PBR textures from [Poly Haven](https://polyhaven.com/).
 
 Inspired by [davrous/musicalJARVIB](https://github.com/davrous/musicalJARVIB), but using a Foundry
 hosted agent (Microsoft Agent Framework) instead of a direct LLM call, and a custom web chat instead of Teams.
@@ -19,12 +20,26 @@ hosted agent (Microsoft Agent Framework) instead of a direct LLM call, and a cus
 - **3D model library** — the agent can search Microsoft's public 3D-model service and return a
   thumbnail gallery in the chat. Clicking a thumbnail loads that GLB into the scene instantly
   (client-side), then silently tells the agent the model's name so follow-ups like "make it bigger"
-  keep working.
+  keep working. A `register_loaded_mesh` tool mirrors that client-side load into the validation
+  sandbox so later code that references the model by name still validates.
+- **Poly Haven textures** — the agent can search [Poly Haven](https://polyhaven.com/) for free PBR
+  surface textures (`list_available_textures`) and return a thumbnail gallery in a ```textures block.
+  Once you pick one and name a mesh, `apply_texture` resolves the texture's albedo / normal /
+  roughness-AO-metalness maps and builds a `BABYLON.PBRMaterial` that is assigned to that mesh (and
+  its children, so imported GLB models work too). Clicking a texture thumbnail asks the agent to apply
+  it to the relevant mesh. Tiling and resolution (1k–8k) are adjustable.
+- **Physics (Havok)** — every scene has the Havok physics engine enabled with gravity, so you can ask
+  for things like "drop a bouncing ball onto the ground" and the agent attaches `PhysicsAggregate`
+  bodies. Physics is pre-enabled both in the browser and in the validation sandbox.
 - **Automatic sizing & framing** — [`SceneFit`](webchat/public/scenefit.js) measures each turn's new
-  content, rescales it to a consistent canonical size, rests it on the ground, and frames the camera,
-  so you never worry about absolute units.
+  content, rescales it to a consistent canonical size, rests it on the ground, positions it to avoid
+  overlapping existing content, and frames the camera, so you never worry about absolute units.
 - **Server-side validation (optional)** — when enabled, the agent validates its own generated code in
   a headless Babylon `NullEngine` sandbox and fixes-and-retries (up to 3×) before replying.
+- **Validation-failure capture (optional)** — when `CAPTURE_VALIDATION_FAILURES=true`, every failing
+  validate→fix→retry attempt (code + error + originating prompt) is persisted to disk via
+  [`failure_store.py`](failure_store.py) and exposed through a `list_validation_failures` tool, so
+  failures can be inspected and turned into an evaluation dataset.
 - **In-canvas activity HUD** — progress and tool calls are drawn with the Babylon 3D GUI (not DOM
   overlays), so they remain visible inside a future VR session.
 - **Live streaming chat** — replies stream token-by-token over Server-Sent Events, with a status pill
@@ -35,7 +50,7 @@ hosted agent (Microsoft Agent Framework) instead of a direct LLM call, and a cus
 | Component | Path | Stack | Default Port |
 |-----------|------|-------|--------------|
 | Hosted agent | [agent.py](agent.py) | Python · Microsoft Agent Framework · `FoundryChatClient` + `ResponsesHostServer` (OpenAI Responses API at `POST /responses`) | 8088 |
-| Validator (optional) | [validator/server.js](validator/server.js) | Node.js · Express · Babylon.js `NullEngine` (headless) | 8087 |
+| Validator (optional) | [validator/server.js](validator/server.js) | Node.js · Express · Babylon.js `NullEngine` (headless) + Havok physics | 8087 |
 | Web chat backend | [webchat/server.js](webchat/server.js) | Node.js · Express proxy (SSE) + static file server | 3000 |
 | Web chat front-end | [webchat/public/](webchat/public/) | Babylon.js (CDN) · [`app.js`](webchat/public/app.js) (chat + scene) · [`scenefit.js`](webchat/public/scenefit.js) (auto-scale) · [`activity.js`](webchat/public/activity.js) (3D HUD) | — |
 
@@ -57,12 +72,13 @@ flowchart LR
     subgraph agent["Hosted agent — agent.py"]
         host["ResponsesHostServer<br/>POST /responses"]
         fcc["FoundryChatClient"]
-        tools["Tools:<br/>validate_babylon_code<br/>list_available_models<br/>download_model"]
+        tools["Tools:<br/>validate_babylon_code<br/>list_available_models<br/>download_model<br/>list_available_textures<br/>apply_texture<br/>register_loaded_mesh<br/>list_validation_failures"]
     end
 
-    validator["Validator — validator/server.js<br/>Babylon NullEngine<br/>POST /validate (bundled in agent image)"]
+    validator["Validator — validator/server.js<br/>Babylon NullEngine + Havok<br/>POST /validate · /register-mesh (bundled in agent image)"]
     foundry["Microsoft Foundry<br/>project + model deployment"]
     library["Microsoft 3D-model service<br/>(officeapps media search)"]
+    polyhaven["Poly Haven<br/>(free PBR textures)"]
 
     user --> chat
     chat -->|POST /api/chat| proxy
@@ -71,6 +87,7 @@ flowchart LR
     host --> tools
     tools -. ENABLE_VALIDATION=true .-> validator
     tools --> library
+    tools --> polyhaven
     proxy -->|SSE: delta / tool / done| chat
     chat -->|extract javascript block| canvas
     chat -->|gallery click loads GLB| canvas
@@ -81,11 +98,15 @@ flowchart LR
 **Validation flag** — generated code is validated server-side, never in the browser:
 
 - `ENABLE_VALIDATION=true` → the agent calls the Node.js `/validate` tool (headless `NullEngine`)
-  before replying, and retries (up to 3×) if the generated code throws.
+  before replying, and retries (up to 3×) if the generated code throws. The sandbox scene is
+  cumulative; client-side GLB loads are mirrored into it via `/register-mesh` so later snippets that
+  reference a loaded model by name still validate.
 - `ENABLE_VALIDATION=false` → the LLM's code is returned directly with no validation.
+- `CAPTURE_VALIDATION_FAILURES=true` (independent of the above) → each failed validation attempt is
+  persisted to disk for later inspection via the `list_validation_failures` tool.
 
 The web chat client is intentionally unaware of validation — it just renders prose, executes the
-returned `javascript` code blocks, and renders any `models` gallery block.
+returned `javascript` code blocks, and renders any `models` or `textures` gallery block.
 
 ### Request flow
 
@@ -191,7 +212,10 @@ the Python agent (Responses API on 8088) and the Node.js Babylon `NullEngine` va
 waits for it to become healthy, then execs the agent. `agent.yaml` therefore sets
 `ENABLE_VALIDATION=true` and points `VALIDATOR_URL` at `http://localhost:8087/validate`.
 Foundry runs a single container per hosted agent, so co-hosting the validator (rather than
-running it as a separate service) is what keeps validation working once deployed.
+running it as a separate service) is what keeps validation working once deployed. Because
+three runtimes (Python + Node + Babylon/Havok) share the container, `agent.yaml` requests
+`2.0` CPU / `4.0Gi` memory, and sets `CAPTURE_VALIDATION_FAILURES=true` so failed attempts
+are persisted to the micro-VM disk for later evaluation.
 
 Build and push the image to ACR, then create/update the agent (see the Foundry hosted-agent
 deploy workflow). Use cloud build if you don't have Docker locally:
@@ -208,6 +232,12 @@ az acr build --registry <acr-name> --image verbalreality:$(date +%Y%m%d%H%M) \
 - Ask the agent to **find real models** ("find a chair", "show me some dinosaurs") to get a thumbnail
   gallery in the chat; click a thumbnail to drop that GLB into the scene instantly. Follow up in
   natural language ("make it twice as big", "rotate it") and the agent remembers the loaded mesh.
+- Ask the agent to **find textures** ("find a brick texture", "show me some rock surfaces") to get a
+  Poly Haven thumbnail gallery; then say which mesh to dress ("put the first brick on the wall",
+  "apply that rock to the ground, tiled 6x") and the agent applies it as a PBR material. Clicking a
+  texture thumbnail asks the agent to apply it to the relevant mesh.
+- Ask for **physics** ("drop a bouncing ball onto the ground", "stack some crates and topple them")
+  — the scene already has Havok gravity enabled, so the agent just attaches physics bodies.
 - Drag the divider on the chat's left border to resize the chat panel.
 - <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> inserts a newline.
 
@@ -218,10 +248,18 @@ az acr build --registry <acr-name> --image verbalreality:$(date +%Y%m%d%H%M) \
 | `PROJECT_ENDPOINT` | Foundry project endpoint | _(required)_ |
 | `MODEL_DEPLOYMENT_NAME` | Model deployment name | `gpt-4.1` |
 | `ENABLE_VALIDATION` | Toggle the NullEngine validation tool | `true` |
-| `VALIDATOR_URL` | Validator endpoint used by the agent tool | `http://localhost:8087/validate` |
+| `VALIDATOR_URL` | Validator `/validate` endpoint used by the agent tool | `http://localhost:8087/validate` |
+| `VALIDATOR_REGISTER_URL` | Validator `/register-mesh` endpoint (synced from browser GLB loads) | derived from `VALIDATOR_URL` |
+| `CAPTURE_VALIDATION_FAILURES` | Persist failed validation attempts for evaluation | `true` |
+| `FAILURE_STORE_DIR` | Where captured failures are written | `$HOME/validation_failures` (falls back to `/tmp`) |
+| `FAILURE_STORE_MAX_LINES` | Soft cap on `failures.jsonl` length | `500` |
+| `LOG_LEVEL` | Python agent log level | `INFO` |
 | `PORT` | Port the agent's Responses server listens on | `8088` |
 | `MODEL_SEARCH_URL` | Microsoft 3D-model search endpoint used by `list_available_models` | _(officeapps media search)_ |
 | `MODEL_SEARCH_PAGE_SIZE` | Max models returned per library search | `5` |
+| `POLYHAVEN_API` | Poly Haven asset API used by `list_available_textures` / `apply_texture` | `https://api.polyhaven.com` |
+| `TEXTURE_SEARCH_PAGE_SIZE` | Max textures returned per Poly Haven search | `6` |
+| `TEXTURE_DEFAULT_RESOLUTION` | Default texture resolution when unspecified (`1k`/`2k`/`4k`/`8k`) | `2k` |
 
 The web chat backend also honors `PORT` and `AGENT_MODEL`
 (see [webchat/server.js](webchat/server.js)). The validator honors `PORT`
