@@ -86,6 +86,12 @@
     if (window.ActivityIndicators) {
       window.ActivityIndicators.attach(scene, camera);
     }
+
+    // Bind the direct-manipulation edit mode (gizmos + keyboard/VR controls) to the
+    // (re)built scene.
+    if (window.EditMode) {
+      window.EditMode.attach(scene, camera, engine, { sendMessage: sendMessage });
+    }
     return scene;
   }
 
@@ -721,7 +727,16 @@
       handleReset();
       return;
     }
-    sendMessage(message);
+
+    // If the user manually edited objects with the gizmos since the last message, prepend
+    // a `[scene context]` note so the agent learns their current transforms. The chat
+    // bubble still shows only the user's own text.
+    const editContext = window.EditMode ? window.EditMode.consumePendingEdits() : "";
+    if (editContext) {
+      sendMessage(editContext + "\n\n" + message, { userBubbleText: message });
+    } else {
+      sendMessage(message);
+    }
   });
 
   // Enter to send, Shift+Enter for newline.

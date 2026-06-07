@@ -668,6 +668,16 @@ Rules for the code you generate:
     will fly far out of view). These edits are in plain WORLD units: set `mesh.position`
     (or `mesh.position.x`, etc.) directly — they are NOT multiplied by any hidden scale.
 
+Manual user edits (`[scene context]`):
+  The user can switch to an "edit mode" in the page and move/rotate/scale objects by hand
+  with on-screen gizmos. When they do, their next message is prefixed with a
+  `[scene context]` note listing the CURRENT transform of each object they touched
+  (position in world units, rotation in degrees, scale). Treat those values as the
+  object's up-to-date state. PREFER RELATIVE changes that read the live object (e.g.
+  `mesh.position.x -= 1`, `mesh.rotate(...)`, multiplying `mesh.scaling`) over setting
+  absolute coordinates, so the user's manual edits are preserved and your change adds to
+  them. Only set an absolute transform when the user explicitly asks for an exact value.
+
 Physics (Havok — already enabled):
   The scene ALWAYS has the Havok physics engine enabled with gravity (0, -9.81, 0).
   Do NOT call `scene.enablePhysics(...)`, do NOT construct a `HavokPlugin`, and do NOT
