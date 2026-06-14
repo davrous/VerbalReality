@@ -17,6 +17,10 @@ metadata:
 protocols:
   - protocol: responses
     version: 1.0.0
+  # Real-time voice (preview, North Central US only). The container serves the voice
+  # WebSocket frame protocol; the platform relays raw text/binary frames to it.
+  - protocol: invocations_ws
+    version: 1.0.0
 environment_variables:
   - name: PROJECT_ENDPOINT
     value: "{{PROJECT_ENDPOINT}}"
@@ -33,6 +37,24 @@ environment_variables:
   # micro-VM disk and emit OpenTelemetry error events + structured logs for evaluation.
   - name: CAPTURE_VALIDATION_FAILURES
     value: "true"
+  # --- Voice (cascaded Azure Speech STT -> agent -> TTS of prose only) ---
+  # Enabled only when an Azure Speech resource is configured. Prefer keyless auth: grant
+  # the agent's Entra identity the "Cognitive Services Speech User" role on the Speech /
+  # AI Services resource and set SPEECH_REGION (no SPEECH_KEY needed). Alternatively set
+  # SPEECH_KEY for key-based auth. Deploy in North Central US for the invocations_ws preview.
+  - name: ENABLE_VOICE
+    value: "true"
+  - name: SPEECH_REGION
+    value: "{{SPEECH_REGION}}"
+  # Full ARM resource id of the AIServices/Speech resource. Required for KEYLESS auth
+  # (the Speech SDK uses the aad#<resourceId>#<token> form): grant the agent's Entra
+  # identity the "Cognitive Services User" (or "Cognitive Services Speech User") role on it.
+  - name: SPEECH_RESOURCE_ID
+    value: "{{SPEECH_RESOURCE_ID}}"
+  - name: SPEECH_VOICE_NAME
+    value: "en-US-AvaMultilingualNeural"
+  - name: VOICE_WS_PORT
+    value: "8089"
 dockerfile_path: Dockerfile
 resources:
   # Bumped from 1.0/2.0Gi to fit Python + Node + Babylon.js running together.

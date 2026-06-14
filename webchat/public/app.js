@@ -268,6 +268,12 @@
         remoteOpt.disabled = true;
         remoteOpt.textContent = "Foundry (not configured)";
       }
+      // Disable the voice toggle if the backend exposes no voice endpoint at all.
+      const vt = document.getElementById("voice-toggle");
+      if (vt && !cfg.voiceLocalAvailable && !cfg.voiceRemoteAvailable) {
+        vt.disabled = true;
+        vt.title = "Voice is not configured on the server.";
+      }
     } catch (_) {
       /* leave defaults; backend will reject an unconfigured remote request */
     }
@@ -551,6 +557,83 @@
   // per session, but queuing here gives cleaner UX and avoids racing requests entirely.
   let turnChain = Promise.resolve();
 
+  // ---------------------------------------------------------------------------
+  // Shared agent-turn rendering. Both the typed (SSE) path and the VOICE (WebSocket)
+  // path emit the SAME event shapes ({type:"tool"|"delta"|"done"|"error"}), so they
+  // render chat bubbles, surface tool/validation activity, and execute the returned
+  // Babylon.js code through this one set of helpers — keeping voice fully additive.
+  // ---------------------------------------------------------------------------
+  function makeTurnContext(opts) {
+    const o = opts || {};
+    return {
+      reply: "",
+      agentEl: null,
+      toolAttempts: Object.create(null),
+      errored: false,
+      runCode: o.runCode !== false,
+      message: o.message || "",
+    };
+  }
+
+  // Apply one streamed agent event to a turn context (updates the live chat bubble and
+  // the activity indicators). Does NOT run code — that happens once in finalizeTurn.
+  function renderTurnEvent(evt, ctx) {
+    if (!evt) return;
+    if (evt.type === "tool") {
+      const attempt = (ctx.toolAttempts[evt.name] = (ctx.toolAttempts[evt.name] || 0) + 1);
+      setActivity("\uD83D\uDD27 " + friendlyTool(evt.name, attempt));
+      if (ctx.runCode && window.ActivityIndicators)
+        window.ActivityIndicators.notifyTool(evt.name, attempt);
+    } else if (evt.type === "delta") {
+      ctx.reply += evt.text || "";
+      setActivity("\u270D\uFE0F Writing the Babylon.js scene…");
+      // Stream the agent's text live into the chat window.
+      if (!ctx.agentEl) ctx.agentEl = addMessage("agent", ctx.reply);
+      else {
+        fillMessage(ctx.agentEl, ctx.reply);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    } else if (evt.type === "done") {
+      if (typeof evt.reply === "string" && evt.reply) ctx.reply = evt.reply;
+    } else if (evt.type === "error") {
+      addMessage("error", evt.error || "Agent error.");
+      setStatus("error");
+      ctx.errored = true;
+    }
+  }
+
+  // Finalize a turn: render the final bubble (separating prose from code) and run each
+  // returned Babylon.js snippet in the live canvas. Shared by SSE + voice.
+  function finalizeTurn(ctx) {
+    if (ctx.errored) return;
+    ctx.reply = ctx.reply || "(no reply)";
+    const codeBlocks = extractCodeBlocks(ctx.reply);
+
+    // Clear the indicators before running generated code so the canvas is clean.
+    if (window.ActivityIndicators) window.ActivityIndicators.stop();
+
+    if (ctx.agentEl) fillMessage(ctx.agentEl, ctx.reply, codeBlocks);
+    else addMessage("agent", ctx.reply, { codeBlocks });
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    if (ctx.runCode) {
+      if (codeBlocks.length) setActivity("⚙️ Running the generated code in the canvas…");
+      const beforeFit =
+        codeBlocks.length && window.SceneFit ? SceneFit.snapshot(scene) : null;
+      for (const code of codeBlocks) {
+        const result = executeCode(code);
+        if (!result.ok) {
+          addMessage(
+            "error",
+            "⚠️ The returned code threw while running in the canvas: " + result.error
+          );
+        }
+      }
+      if (beforeFit) SceneFit.fitNewContent(scene, camera, beforeFit);
+    }
+    setStatus("");
+  }
+
   function sendMessage(message, opts) {
     const run = turnChain.then(() => sendMessageImpl(message, opts));
     // Advance the chain whether or not this turn succeeds.
@@ -577,11 +660,7 @@
     if (runCode && window.ActivityIndicators) window.ActivityIndicators.start(message);
     setActivity(initialActivity);
 
-    let reply = "";
-    let errored = false;
-    let agentEl = null;
-    // Per-turn count of validate_babylon_code calls, so retries can be surfaced.
-    const toolAttempts = Object.create(null);
+    const ctx = makeTurnContext({ runCode, message });
 
     try {
       const resp = await fetch("/api/chat", {
@@ -634,63 +713,12 @@
             continue;
           }
 
-          if (evt.type === "tool") {
-            const attempt = (toolAttempts[evt.name] = (toolAttempts[evt.name] || 0) + 1);
-            setActivity("\uD83D\uDD27 " + friendlyTool(evt.name, attempt));
-            if (runCode && window.ActivityIndicators)
-              window.ActivityIndicators.notifyTool(evt.name, attempt);
-          } else if (evt.type === "delta") {
-            reply += evt.text || "";
-            setActivity("\u270D\uFE0F Writing the Babylon.js scene…");
-            // Stream the agent's text live into the chat window.
-            if (!agentEl) agentEl = addMessage("agent", reply);
-            else {
-              fillMessage(agentEl, reply);
-              messagesEl.scrollTop = messagesEl.scrollHeight;
-            }
-          } else if (evt.type === "done") {
-            if (typeof evt.reply === "string" && evt.reply) reply = evt.reply;
-          } else if (evt.type === "error") {
-            addMessage("error", evt.error || "Agent error.");
-            setStatus("error");
-            errored = true;
-          }
+          renderTurnEvent(evt, ctx);
         }
       }
 
-      if (errored) return;
-
-      reply = reply || "(no reply)";
-      const codeBlocks = extractCodeBlocks(reply);
-
-      // Clear the indicators before running generated code so the canvas is clean.
-      if (window.ActivityIndicators) window.ActivityIndicators.stop();
-
-      // Finalize the streamed bubble (separating prose from code), or add a fresh one
-      // if the agent returned everything in a single non-streamed payload.
-      if (agentEl) fillMessage(agentEl, reply, codeBlocks);
-      else addMessage("agent", reply, { codeBlocks });
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-
-      // Run each returned snippet in the live canvas (unless this is a silent context
-      // note, where the model was already loaded client-side and no code should run).
-      if (runCode) {
-        if (codeBlocks.length) setActivity("⚙️ Running the generated code in the canvas…");
-        // Snapshot the scene before running so SceneFit can normalize only what's new.
-        const beforeFit =
-          codeBlocks.length && window.SceneFit ? SceneFit.snapshot(scene) : null;
-        for (const code of codeBlocks) {
-          const result = executeCode(code);
-          if (!result.ok) {
-            addMessage(
-              "error",
-              "⚠️ The returned code threw while running in the canvas: " + result.error
-            );
-          }
-        }
-        // Auto-scale this turn's new content to a canonical size and frame the camera.
-        if (beforeFit) SceneFit.fitNewContent(scene, camera, beforeFit);
-      }
+      if (ctx.errored) return;
+      finalizeTurn(ctx);
       setStatus("");
     } catch (err) {
       addMessage("error", "Network error: " + ((err && err.message) || err));
@@ -745,6 +773,105 @@
       e.preventDefault();
       form.requestSubmit();
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Voice control (push-to-talk). The microphone, WebSocket and audio playback live in
+  // voice.js; here we wire its events into the SAME chat pipeline used for typed turns
+  // (renderTurnEvent / finalizeTurn), so a spoken request builds the scene exactly like
+  // a typed one — and the agent speaks only its prose (the server strips the code before
+  // text-to-speech, while the code still arrives in the {type:"done"} event and runs).
+  // `V` is push-to-talk here; the VR right-controller B button is bound in editmode.js.
+  // ---------------------------------------------------------------------------
+  const voiceToggle = document.getElementById("voice-toggle");
+  let voiceCtx = null;
+
+  function voiceBeginTurn() {
+    if (voiceCtx) return;
+    voiceCtx = makeTurnContext({ runCode: true, message: "(voice request)" });
+    setStatus("busy");
+    if (window.ActivityIndicators) window.ActivityIndicators.start("voice request");
+    setActivity("\uD83E\uDDE0 Thinking…");
+  }
+
+  function voiceEndTurn() {
+    voiceCtx = null;
+    clearActivity();
+    if (window.ActivityIndicators) window.ActivityIndicators.stop();
+    sendBtn.disabled = false;
+  }
+
+  function updateVoiceUI(s) {
+    if (!voiceToggle) return;
+    voiceToggle.classList.toggle("active", !!s.enabled);
+    voiceToggle.classList.toggle("listening", !!s.listening);
+    voiceToggle.classList.toggle("speaking", !!s.speaking);
+    voiceToggle.setAttribute("aria-pressed", s.enabled ? "true" : "false");
+    voiceToggle.title = s.enabled
+      ? "Voice mode ON — hold V (or the VR B button) to talk. Click to turn off."
+      : "Voice mode OFF — click to enable, then hold V to talk.";
+  }
+
+  if (window.VoiceControl) {
+    VoiceControl.init({
+      sessionId: sessionId,
+      getTarget: () => agentTarget,
+      onUserTranscript: (text) => {
+        if (text) addMessage("user", text);
+        voiceBeginTurn();
+      },
+      onAgentEvent: (evt) => {
+        voiceBeginTurn();
+        renderTurnEvent(evt, voiceCtx);
+        if (evt.type === "done") {
+          finalizeTurn(voiceCtx);
+          voiceEndTurn();
+        } else if (evt.type === "error") {
+          if (window.ActivityIndicators) window.ActivityIndicators.stop();
+          setStatus("error");
+          voiceEndTurn();
+        }
+      },
+      onStateChange: updateVoiceUI,
+      onStatus: (msg) => {
+        if (msg) addMessage("system", msg);
+      },
+    });
+  }
+
+  if (voiceToggle) {
+    if (window.VoiceControl && VoiceControl.isSupported()) {
+      voiceToggle.addEventListener("click", () => VoiceControl.toggle());
+      updateVoiceUI({ enabled: false, listening: false, speaking: false });
+    } else {
+      voiceToggle.disabled = true;
+      voiceToggle.title = "Voice is not supported in this browser.";
+    }
+  }
+
+  // `V` = push-to-talk (hold to talk, release to send). Guarded so it never fires while
+  // typing in a form field, and ignores key auto-repeat.
+  let vHeld = false;
+  function isVoiceTypingTarget(el) {
+    if (!el) return false;
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    return !!el.isContentEditable;
+  }
+  window.addEventListener("keydown", (e) => {
+    if (e.repeat || vHeld) return;
+    if ((e.key || "").toLowerCase() !== "v") return;
+    if (isVoiceTypingTarget(e.target)) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!window.VoiceControl || !VoiceControl.isSupported()) return;
+    vHeld = true;
+    VoiceControl.startListening();
+  });
+  window.addEventListener("keyup", (e) => {
+    if ((e.key || "").toLowerCase() !== "v") return;
+    if (!vHeld) return;
+    vHeld = false;
+    if (window.VoiceControl) VoiceControl.stopAndSend();
   });
 
   addMessage(

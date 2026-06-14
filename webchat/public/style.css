@@ -156,6 +156,80 @@ body.resizing {
   color: #6a7090;
 }
 
+/* Voice mode toggle (push-to-talk) */
+#voice-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  background: #1b2138;
+  color: #e8ebf5;
+  border: 1px solid #2a3050;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+#voice-toggle:hover:not(:disabled) {
+  border-color: #3a4170;
+}
+
+#voice-toggle:focus-visible {
+  outline: none;
+  border-color: #5a6bd8;
+}
+
+#voice-toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Voice mode ON */
+#voice-toggle.active {
+  background: #243a8f;
+  border-color: #5a6bd8;
+}
+
+/* Actively capturing the microphone */
+#voice-toggle.listening {
+  border-color: #e53935;
+  box-shadow: 0 0 0 2px rgba(229, 57, 53, 0.35);
+  animation: voicePulse 1.1s ease-in-out infinite;
+}
+
+/* Agent is speaking its reply */
+#voice-toggle.speaking {
+  border-color: #4caf50;
+  box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.35);
+}
+
+@keyframes voicePulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(229, 57, 53, 0.25);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(229, 57, 53, 0.5);
+  }
+}
+
+/* Visually-hidden label text (accessible name for the icon button) */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 #status-dot {
   width: 10px;
   height: 10px;

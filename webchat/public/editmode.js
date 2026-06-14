@@ -6,8 +6,8 @@
 // both on the desktop (mouse) and inside a WebXR/VR session (controller laser).
 //
 // Controls:
-//   Desktop keyboard:  E = enable edit mode,  D = disable.
-//   VR right controller: A button = enable,   B button = disable.
+//   Desktop keyboard:  E = enable edit mode,  D = disable.  V = voice push-to-talk.
+//   VR right controller: A button = TOGGLE edit mode,  B button = voice push-to-talk.
 //
 // Manual edits are NOT streamed to the agent. Instead the final transform of every mesh
 // the user touched is recorded, and `consumePendingEdits()` formats them into a single
@@ -247,14 +247,28 @@ window.EditMode = (function () {
       if (motionController.handedness && motionController.handedness !== "right") return;
       const aButton = motionController.getComponent("a-button");
       const bButton = motionController.getComponent("b-button");
+      // A button = TOGGLE edit mode (press to enable, press again to disable). This frees
+      // the B button to act as voice push-to-talk.
       if (aButton) {
         aButton.onButtonStateChangedObservable.add((c) => {
-          if (c.changes.pressed && c.pressed) enable();
+          if (c.changes.pressed && c.pressed) {
+            if (editEnabled) disable();
+            else enable();
+          }
         });
       }
+      // B button = voice push-to-talk: hold to talk, release to send (mirrors the `V`
+      // key on the desktop). Delegates to the global VoiceControl (voice.js).
       if (bButton) {
         bButton.onButtonStateChangedObservable.add((c) => {
-          if (c.changes.pressed && c.pressed) disable();
+          if (!c.changes.pressed) return;
+          if (c.pressed) {
+            if (window.VoiceControl && window.VoiceControl.isSupported()) {
+              window.VoiceControl.startListening();
+            }
+          } else if (window.VoiceControl) {
+            window.VoiceControl.stopAndSend();
+          }
         });
       }
     });

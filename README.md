@@ -44,15 +44,26 @@ hosted agent (Microsoft Agent Framework) instead of a direct LLM call, and a cus
   overlays), so they remain visible inside a future VR session.
 - **Live streaming chat** — replies stream token-by-token over Server-Sent Events, with a status pill
   reflecting the agent's current step.
+- **Voice control (push-to-talk)** — talk to the agent hands-free. Hold <kbd>V</kbd> on the keyboard
+  (or the **B** button on the VR right controller) to speak; release to send. This uses the
+  **Foundry-native `invocations_ws` WebSocket protocol** with a cascaded **Azure Speech** pipeline
+  (speech-to-text → the same agent → text-to-speech) running inside the agent container. The agent
+  speaks **only its prose** — the returned Babylon.js code is stripped before text-to-speech, so it
+  still runs in the canvas and stays in the cumulative scene context, but is never read aloud. Voice
+  is fully **additive**: text chat, the model/texture galleries, validation retries and the activity
+  HUD all keep working unchanged. A 🎙️ toggle in the chat header turns voice mode on/off, and
+  barge-in lets you interrupt the agent by starting to talk. In VR the right-controller **A** button
+  toggles edit mode (freeing **B** for voice).
 
 ## Architecture
 
 | Component | Path | Stack | Default Port |
 |-----------|------|-------|--------------|
 | Hosted agent | [agent.py](agent.py) | Python · Microsoft Agent Framework · `FoundryChatClient` + `ResponsesHostServer` (OpenAI Responses API at `POST /responses`) | 8088 |
+| Voice pipeline (optional) | [voice_pipeline.py](voice_pipeline.py) | Python · `invocations_ws` WebSocket · Azure Speech STT/TTS cascade (co-hosted with the agent) | 8089 |
 | Validator (optional) | [validator/server.js](validator/server.js) | Node.js · Express · Babylon.js `NullEngine` (headless) + Havok physics | 8087 |
-| Web chat backend | [webchat/server.js](webchat/server.js) | Node.js · Express proxy (SSE) + static file server | 3000 |
-| Web chat front-end | [webchat/public/](webchat/public/) | Babylon.js (CDN) · [`app.js`](webchat/public/app.js) (chat + scene) · [`scenefit.js`](webchat/public/scenefit.js) (auto-scale) · [`activity.js`](webchat/public/activity.js) (3D HUD) | — |
+| Web chat backend | [webchat/server.js](webchat/server.js) | Node.js · Express proxy (SSE) + `/api/voice` WebSocket relay + static file server | 3000 |
+| Web chat front-end | [webchat/public/](webchat/public/) | Babylon.js (CDN) · [`app.js`](webchat/public/app.js) (chat + scene) · [`voice.js`](webchat/public/voice.js) (mic + playback) · [`scenefit.js`](webchat/public/scenefit.js) (auto-scale) · [`activity.js`](webchat/public/activity.js) (3D HUD) | — |
 
 ```mermaid
 flowchart LR
@@ -61,22 +72,26 @@ flowchart LR
     subgraph browser["Browser — webchat/public"]
         canvas["Babylon.js canvas<br/>(live cumulative scene)"]
         chat["Chat panel + SSE client<br/>app.js"]
+        voice["VoiceControl<br/>mic + playback<br/>voice.js"]
         scenefit["SceneFit<br/>auto-scale &amp; frame"]
         activity["ActivityIndicators<br/>3D GUI HUD"]
     end
 
     subgraph webchat["Web chat backend — webchat/server.js"]
         proxy["Express proxy<br/>/api/chat (SSE)<br/>session → previous_response_id"]
+        voicerelay["/api/voice<br/>WebSocket relay<br/>(adds bearer token)"]
     end
 
     subgraph agent["Hosted agent — agent.py"]
         host["ResponsesHostServer<br/>POST /responses"]
+        voicews["voice_pipeline.py<br/>invocations_ws<br/>Azure Speech STT/TTS"]
         fcc["FoundryChatClient"]
         tools["Tools:<br/>validate_babylon_code<br/>list_available_models<br/>download_model<br/>list_available_textures<br/>apply_texture<br/>register_loaded_mesh<br/>list_validation_failures"]
     end
 
     validator["Validator — validator/server.js<br/>Babylon NullEngine + Havok<br/>POST /validate · /register-mesh (bundled in agent image)"]
     foundry["Microsoft Foundry<br/>project + model deployment"]
+    speech["Azure Speech<br/>(STT + TTS)"]
     library["Microsoft 3D-model service<br/>(officeapps media search)"]
     polyhaven["Poly Haven<br/>(free PBR textures)"]
 
@@ -93,6 +108,13 @@ flowchart LR
     chat -->|gallery click loads GLB| canvas
     canvas --> scenefit
     chat --> activity
+    voice -->|hold V / VR B — PCM audio + control| voicerelay
+    voicerelay -->|invocations_ws (bearer token)| voicews
+    voicews --> speech
+    voicews -->|shares the same agent| host
+    voicews -->|tool / delta / done + spoken prose audio| voicerelay
+    voicerelay --> voice
+    voice -->|run code, never spoken| canvas
 ```
 
 **Validation flag** — generated code is validated server-side, never in the browser:
@@ -137,6 +159,11 @@ sequenceDiagram
 - Python 3.10+, Node.js 18+
 - Azure CLI logged in for local dev: `az login` (the agent uses `DefaultAzureCredential`)
 - A Microsoft Foundry project endpoint + a deployed model
+- **For voice (optional):** an **Azure AI Services / Speech** resource and a microphone-capable
+  browser (Chrome, Edge or Safari). The `invocations_ws` voice protocol is currently in **preview and
+  available only in the North Central US region**, so the hosted agent must be deployed there for
+  remote voice. See [Voice support](#voice-support-optional) below for the required configuration and
+  the **agent-identity role assignment**.
 
 ## Setup
 
@@ -225,6 +252,14 @@ az acr build --registry <acr-name> --image verbalreality:$(date +%Y%m%d%H%M) \
   --platform linux/amd64 --source-acr-auth-id "[caller]" --file Dockerfile .
 ```
 
+**Voice in production** — the image also serves the optional `invocations_ws` voice WebSocket
+(port 8089) co-hosted with the agent; [agent.yaml](agent.yaml) declares the `invocations_ws` protocol
+and the Speech environment variables. Deploy in **North Central US** (the `invocations_ws` preview
+region) and grant the agent's **Entra (agent) identity** the **Cognitive Services User** role on the
+Speech / AI Services resource — see [Voice support](#voice-support-optional). Voice is optional: with
+`ENABLE_VOICE=false` (or no Speech resource configured) the agent runs text-only and nothing else
+changes.
+
 ## Usage tips
 
 - Each request adds to the existing scene (cumulative). Type `/reset` in the chat to clear both the
@@ -240,6 +275,9 @@ az acr build --registry <acr-name> --image verbalreality:$(date +%Y%m%d%H%M) \
   — the scene already has Havok gravity enabled, so the agent just attaches physics bodies.
 - Drag the divider on the chat's left border to resize the chat panel.
 - <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> inserts a newline.
+- **Talk to the agent:** turn on voice mode with the 🎙️ header toggle, then hold <kbd>V</kbd> (or the
+  VR right-controller **B** button) to speak and release to send. The agent speaks its reply but never
+  reads the generated code aloud. See [Voice support](#voice-support-optional) for setup.
 
 ## Configuration reference (`.env`)
 
@@ -260,6 +298,15 @@ az acr build --registry <acr-name> --image verbalreality:$(date +%Y%m%d%H%M) \
 | `POLYHAVEN_API` | Poly Haven asset API used by `list_available_textures` / `apply_texture` | `https://api.polyhaven.com` |
 | `TEXTURE_SEARCH_PAGE_SIZE` | Max textures returned per Poly Haven search | `6` |
 | `TEXTURE_DEFAULT_RESOLUTION` | Default texture resolution when unspecified (`1k`/`2k`/`4k`/`8k`) | `2k` |
+| `ENABLE_VOICE` | Toggle the voice (`invocations_ws` + Azure Speech) pipeline | `true` |
+| `SPEECH_REGION` | Azure Speech / AI Services region (must be `northcentralus` for the hosted `invocations_ws` preview) | _(unset → voice off)_ |
+| `SPEECH_RESOURCE_ID` | Full ARM resource id of the Speech / AI Services resource, used for **keyless** (Entra ID) auth | _(unset)_ |
+| `SPEECH_KEY` | Speech key — only if you prefer key-based auth over keyless | _(unset)_ |
+| `SPEECH_ENDPOINT` | Custom Speech endpoint (alternative to region) | _(unset)_ |
+| `SPEECH_VOICE_NAME` | Neural voice used for the spoken reply | `en-US-AvaMultilingualNeural` |
+| `SPEECH_RECOGNITION_LANGUAGE` | Speech-to-text locale | `en-US` |
+| `SPEECH_AAD_SCOPE` | Token scope for keyless Speech auth | `https://cognitiveservices.azure.com/.default` |
+| `VOICE_WS_PORT` | Port the agent serves the voice WebSocket on | `8089` |
 
 The web chat backend also honors `PORT` and `AGENT_MODEL`
 (see [webchat/server.js](webchat/server.js)). The validator honors `PORT`
@@ -345,8 +392,88 @@ You can confirm the backend's view at any time:
 
 ```bash
 curl -s http://localhost:3000/api/config
-# {"localConfigured":true,"remoteConfigured":true}
+# {"localConfigured":true,"remoteConfigured":true,"voiceLocalAvailable":true,"voiceRemoteAvailable":true}
 ```
 
 If a remote request fails with an auth error, the chat surfaces a message telling you to run
 `az login` or check `REMOTE_AGENT_SCOPE`.
+
+## Voice support (optional)
+
+Talk to the agent with **push-to-talk**: hold <kbd>V</kbd> (keyboard) or the VR right-controller **B**
+button to speak, release to send. Toggle voice mode with the 🎙️ button in the chat header.
+
+### How it works
+
+Voice uses the **Foundry-native `invocations_ws` WebSocket protocol** (preview) rather than the
+text Responses API. The agent container co-hosts a small WebSocket pipeline
+([voice_pipeline.py](voice_pipeline.py)) next to the Responses server, sharing the **same** in-process
+agent (so all tools, validation and instructions are identical for spoken and typed turns):
+
+```
+microphone (16 kHz PCM)  →  Azure Speech STT  →  the agent  →  control frames + Azure Speech TTS
+```
+
+- The agent's reply is streamed back as the **same event shapes** the browser already handles for
+  typed turns (`tool` / `delta` / `done`), so spoken requests build the scene, render galleries and
+  surface validation retries exactly like typed ones.
+- **Only the prose is spoken.** Every fenced block (```` ```javascript ````, ```` ```models ````,
+  ```` ```textures ````) is stripped server-side before text-to-speech — so the returned Babylon.js
+  code still arrives in the browser, runs in the canvas, and stays in the cumulative scene context,
+  but is never read aloud.
+- The browser cannot set an `Authorization` header on a WebSocket upgrade, so the web chat backend
+  relays the browser's voice socket to the upstream endpoint at `/api/voice` and injects the Foundry
+  bearer token for the remote target. Audio never touches Azure identity in the browser.
+- **Barge-in:** starting to talk while the agent is speaking cancels playback and listens.
+
+Browser support: Chrome, Edge or Safari (microphone capture + Web Audio). The 🎙️ toggle is
+disabled automatically if the browser or the server isn't voice-capable.
+
+### Configure voice
+
+1. **Provision / reuse a Speech resource.** Voice needs an **Azure AI Services** (multi-service) or
+   **Speech** resource. An existing Foundry **AI Services** resource already includes Speech, so you
+   can reuse it — just make sure it is in **North Central US** for the hosted `invocations_ws` preview.
+
+2. **Set the voice environment variables** in `.env` (keyless / Entra ID auth is recommended):
+
+   ```bash
+   ENABLE_VOICE=true
+   SPEECH_REGION=northcentralus
+   # Full ARM id of the Speech / AI Services resource (used for keyless aad# auth):
+   SPEECH_RESOURCE_ID=/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<name>
+   SPEECH_VOICE_NAME=en-US-AvaMultilingualNeural
+   VOICE_WS_PORT=8089
+   # Alternatively, key-based auth instead of keyless:
+   # SPEECH_KEY=<speech-key>
+   ```
+
+3. **Grant the role for keyless auth.**
+
+   - **Local dev** uses *your* identity (`az login`). Assign yourself **Cognitive Services User** (or
+     **Cognitive Services Speech User**) on the Speech resource if you don't already have it.
+   - **Hosted deploy** uses the **agent's own Microsoft Entra (agent) identity**, which is created at
+     deploy time and is **different from your user identity**. You must grant **that** identity the
+     **Cognitive Services User** (or **Cognitive Services Speech User**) role on the Speech / AI
+     Services resource, otherwise voice turns fail to authenticate while text turns keep working.
+
+   ```bash
+   # Grant the agent's Entra identity access to the Speech resource (hosted deploy).
+   SPEECH_RID="/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<name>"
+   az role assignment create \
+     --assignee-object-id <AGENT_ENTRA_OBJECT_ID> \
+     --assignee-principal-type ServicePrincipal \
+     --role "Cognitive Services User" \
+     --scope "$SPEECH_RID"
+   ```
+
+   > If the Speech resource has local authentication disabled (`disableLocalAuth=true`), keyless
+   > (Entra ID) auth is the **only** option — set `SPEECH_RESOURCE_ID` and assign the role above; do
+   > not set `SPEECH_KEY`.
+
+4. **Deploy region.** Because `invocations_ws` is preview and **North Central US only**, deploy the
+   hosted agent (and use a Speech resource) in that region for remote voice. [agent.yaml](agent.yaml)
+   already declares the `invocations_ws` protocol and templates `SPEECH_REGION` / `SPEECH_RESOURCE_ID`.
+
+When configured, `GET /api/config` reports `voiceLocalAvailable` / `voiceRemoteAvailable`, and the
+agent logs `Voice path ENABLED — serving voice WebSocket on port 8089.` on startup.

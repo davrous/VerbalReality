@@ -29,6 +29,8 @@
 const path = require("path");
 const express = require("express");
 const { DefaultAzureCredential } = require("@azure/identity");
+const WebSocket = require("ws");
+const { URL } = require("url");
 
 // Load the repo-root .env (shared with the Python agent) so values like
 // REMOTE_AGENT_ENDPOINT are picked up. Existing process env vars win over the file.
@@ -76,6 +78,48 @@ const REMOTE_AGENT_ENDPOINT = (
 const REMOTE_AGENT_SCOPE =
   process.env.REMOTE_AGENT_SCOPE || "https://ai.azure.com/.default";
 const AGENT_MODEL = process.env.AGENT_MODEL || "gpt-4.1";
+
+// --- Voice (real-time invocations_ws relay) ---------------------------------------
+// The browser cannot set an Authorization header on a WebSocket upgrade, so the chat
+// backend relays the browser's voice socket to the upstream voice endpoint, injecting
+// the bearer token for the remote (Foundry) target. For the local agent the voice
+// WebSocket is reached directly (no auth).
+//   LOCAL_VOICE_WS_URL   local agent voice socket (default ws://localhost:8089/invocations_ws)
+//   VOICE_FOUNDRY_FEATURES  preview gate for the hosted-agent invocations_ws protocol
+const LOCAL_VOICE_WS_URL =
+  process.env.LOCAL_VOICE_WS_URL || "ws://localhost:8089/invocations_ws";
+const VOICE_FOUNDRY_FEATURES =
+  process.env.VOICE_FOUNDRY_FEATURES || "HostedAgents=V1Preview";
+
+// Build the remote (Foundry hosted) voice WebSocket URL from the project endpoint:
+//   wss://<account>/api/projects/agents/endpoint/protocols/invocations_ws
+//        ?project_name=<project>&agent_name=<name>&agent_session_id=<sid>
+//        &foundry_features=HostedAgents=V1Preview
+// invocations_ws is preview + currently North Central US only.
+function buildRemoteVoiceWsUrl(sessionId) {
+  if (!REMOTE_AGENT_PROJECT_ENDPOINT || !REMOTE_AGENT_NAME) return "";
+  let parsed;
+  try {
+    parsed = new URL(REMOTE_AGENT_PROJECT_ENDPOINT);
+  } catch (_) {
+    return "";
+  }
+  const project = parsed.pathname.replace(/\/+$/, "").split("/").pop() || "";
+  const sid = sessionId || "default";
+  const qs = new URLSearchParams({
+    project_name: project,
+    agent_name: REMOTE_AGENT_NAME,
+    agent_session_id: sid,
+    foundry_features: VOICE_FOUNDRY_FEATURES,
+  });
+  return `wss://${parsed.host}/api/projects/agents/endpoint/protocols/invocations_ws?${qs.toString()}`;
+}
+
+function voiceAvailableForTarget(target) {
+  return target === "remote"
+    ? Boolean(REMOTE_AGENT_PROJECT_ENDPOINT && REMOTE_AGENT_NAME)
+    : Boolean(LOCAL_VOICE_WS_URL);
+}
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -418,6 +462,8 @@ app.get("/api/config", (req, res) => {
   res.json({
     localConfigured: Boolean(LOCAL_AGENT_ENDPOINT),
     remoteConfigured: Boolean(REMOTE_AGENT_ENDPOINT),
+    voiceLocalAvailable: voiceAvailableForTarget("local"),
+    voiceRemoteAvailable: voiceAvailableForTarget("remote"),
   });
 });
 
@@ -430,10 +476,133 @@ app.post("/api/reset", (req, res) => {
   res.json({ ok: true });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Web chat on http://localhost:${PORT}`);
   console.log(`  local  agent -> ${LOCAL_AGENT_ENDPOINT}`);
   console.log(
     `  remote agent -> ${REMOTE_AGENT_ENDPOINT || "(not configured)"}`
   );
 });
+
+// ---------------------------------------------------------------------------
+// Voice WebSocket relay: browser <-> this backend <-> upstream invocations_ws.
+// The browser opens ws://<webchat>/api/voice?target=local|remote&sessionId=<id>. We
+// open the matching upstream voice socket (adding the Foundry bearer token for the
+// remote target) and pipe text + binary frames in both directions. The Azure token
+// stays server-side; the browser never handles credentials.
+// ---------------------------------------------------------------------------
+const voiceWss = new WebSocket.Server({ noServer: true });
+
+server.on("upgrade", (req, socket, head) => {
+  let pathname = "";
+  try {
+    pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
+  } catch (_) {
+    pathname = "";
+  }
+  if (pathname !== "/api/voice") {
+    socket.destroy();
+    return;
+  }
+  voiceWss.handleUpgrade(req, socket, head, (client) => {
+    voiceWss.emit("connection", client, req);
+  });
+});
+
+voiceWss.on("connection", async (client, req) => {
+  let target = "local";
+  let sessionId = "default";
+  try {
+    const q = new URL(req.url, `http://${req.headers.host}`).searchParams;
+    target = q.get("target") === "remote" ? "remote" : "local";
+    sessionId = q.get("sessionId") || "default";
+  } catch (_) {
+    /* keep defaults */
+  }
+
+  if (!voiceAvailableForTarget(target)) {
+    safeCloseVoice(client, 1011, `Voice is not configured for the ${target} agent.`);
+    return;
+  }
+
+  let upstreamUrl = "";
+  const upstreamOptions = {};
+  try {
+    if (target === "remote") {
+      upstreamUrl = buildRemoteVoiceWsUrl(sessionId);
+      const auth = await getRemoteAuthHeader();
+      upstreamOptions.headers = {
+        Authorization: auth,
+        "Foundry-Features": VOICE_FOUNDRY_FEATURES,
+      };
+    } else {
+      upstreamUrl = LOCAL_VOICE_WS_URL;
+    }
+  } catch (authErr) {
+    safeCloseVoice(
+      client,
+      1011,
+      `Could not authenticate voice to the remote agent: ${authErr.message || authErr}`
+    );
+    return;
+  }
+
+  if (!upstreamUrl) {
+    safeCloseVoice(client, 1011, "Could not resolve the upstream voice endpoint.");
+    return;
+  }
+
+  const upstream = new WebSocket(upstreamUrl, upstreamOptions);
+  // Buffer browser frames that arrive before the upstream socket is open.
+  const pending = [];
+  let upstreamOpen = false;
+
+  upstream.on("open", () => {
+    upstreamOpen = true;
+    for (const frame of pending.splice(0)) upstream.send(frame);
+  });
+  upstream.on("message", (data, isBinary) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(data, { binary: isBinary });
+    }
+  });
+  upstream.on("close", (code, reason) => safeCloseVoice(client, normalizeWsCode(code), reason));
+  upstream.on("error", (err) => {
+    console.error("voice upstream error:", err && err.message ? err.message : err);
+    safeCloseVoice(client, 1011, "Voice upstream error.");
+  });
+
+  client.on("message", (data, isBinary) => {
+    const frame = isBinary ? data : data.toString();
+    if (upstreamOpen && upstream.readyState === WebSocket.OPEN) upstream.send(frame);
+    else pending.push(frame);
+  });
+  client.on("close", () => {
+    if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
+      upstream.close();
+    }
+  });
+  client.on("error", () => {
+    try {
+      upstream.close();
+    } catch (_) {
+      /* ignore */
+    }
+  });
+});
+
+// Close codes outside the valid application range (or absent) are normalized so the
+// browser doesn't receive an invalid frame.
+function normalizeWsCode(code) {
+  return typeof code === "number" && code >= 1000 && code <= 4999 ? code : 1011;
+}
+
+function safeCloseVoice(client, code, reason) {
+  try {
+    if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
+      client.close(normalizeWsCode(code), typeof reason === "string" ? reason.slice(0, 120) : undefined);
+    }
+  } catch (_) {
+    /* ignore */
+  }
+}

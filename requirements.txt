@@ -17,5 +17,13 @@ azure-identity>=1.25.3
 python-dotenv>=1.2.2
 httpx>=0.27
 
+# Real-time voice path (Foundry-native invocations_ws + Azure Speech cascade):
+#   * websockets               -> serves the voice WebSocket in the container (and the
+#                                 transport-agnostic frame loop reused by invocations_ws).
+#   * azure-cognitiveservices-speech -> STT (microphone) + TTS (prose-only) pipeline.
+# Both are only imported when ENABLE_VOICE=true and an Azure Speech resource is set.
+websockets>=12.0
+azure-cognitiveservices-speech>=1.40.0
+
 # Local debugging (VS Code Python Debugger / AI Toolkit Agent Inspector).
 debugpy>=1.8.20

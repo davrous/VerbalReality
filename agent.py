@@ -944,11 +944,37 @@ async def run_cli() -> None:
 
 
 async def run_server() -> None:
-    """Host the agent as an HTTP server (OpenAI Responses API) for Foundry / F5."""
+    """Host the agent for Foundry / F5.
+
+    Serves the OpenAI Responses API (text chat) and, when voice is enabled and an Azure
+    Speech resource is configured, ALSO serves the real-time voice WebSocket alongside
+    it on a separate port (the container side of the hosted-agent `invocations_ws`
+    protocol). Both share the SAME in-process `agent`, so a voice turn and a typed turn
+    use identical tools, validation and instructions.
+    """
     client = create_chat_client()
     async with create_agent(client) as agent:
         server = ResponsesHostServer(agent)
-        await server.run_async(port=SERVER_PORT)
+        tasks = [asyncio.ensure_future(server.run_async(port=SERVER_PORT))]
+
+        try:
+            import voice_pipeline
+
+            if voice_pipeline.voice_available():
+                logger.info(
+                    "Voice path ENABLED — serving voice WebSocket on port %d.",
+                    voice_pipeline.VOICE_WS_PORT,
+                )
+                tasks.append(asyncio.ensure_future(voice_pipeline.run_ws_server(agent)))
+            else:
+                logger.info(
+                    "Voice path DISABLED (set ENABLE_VOICE=true and configure an Azure "
+                    "Speech resource via SPEECH_REGION + SPEECH_KEY or managed identity)."
+                )
+        except Exception:  # noqa: BLE001 - voice is optional; never block text chat
+            logger.warning("Voice path failed to initialise; continuing with text only.", exc_info=True)
+
+        await asyncio.gather(*tasks)
 
 
 def main() -> None:

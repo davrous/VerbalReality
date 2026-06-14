@@ -22,8 +22,9 @@ WORKDIR /app
 #   * curl / ca-certificates -> health probing + AzureCliCredential fallback locally.
 #   * tini                   -> proper PID 1 (reaps the background Node process, forwards signals).
 #   * Node.js 20 + npm       -> runs the Babylon NullEngine validator.
+#   * libssl3 / libasound2   -> required by the Azure Speech SDK (voice STT/TTS pipeline).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates gnupg tini \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg tini libssl3 libasound2 \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -50,12 +51,13 @@ RUN pip install --no-cache-dir --pre -r requirements.txt
 # --- Application code ---
 COPY agent.py .
 COPY failure_store.py .
+COPY voice_pipeline.py .
 COPY agent.yaml .
 COPY validator/server.js ./validator/server.js
 COPY start.sh .
 RUN chmod +x start.sh
 
-EXPOSE 8088
+EXPOSE 8088 8089
 
 # tini as PID 1; start.sh launches the Node validator in the background, waits for it
 # to become healthy, then execs the Python agent in the foreground.
