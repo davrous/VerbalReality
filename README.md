@@ -111,7 +111,7 @@ flowchart LR
     voice -->|hold V / VR B — PCM audio + control| voicerelay
     voicerelay -->|invocations_ws + bearer token| voicews
     voicews --> speech
-    voicews -->|shares the same agent| host
+    voicews -->|POST /responses, shared history| host
     voicews -->|tool / delta / done + spoken prose audio| voicerelay
     voicerelay --> voice
     voice -->|run code, never spoken| canvas
@@ -277,7 +277,9 @@ changes.
 - <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> inserts a newline.
 - **Talk to the agent:** turn on voice mode with the 🎙️ header toggle, then hold <kbd>V</kbd> (or the
   VR right-controller **B** button) to speak and release to send. The agent speaks its reply but never
-  reads the generated code aloud. See [Voice support](#voice-support-optional) for setup.
+  reads the generated code aloud. You can freely **mix voice and typing** — they share one
+  conversation, so the agent remembers what you built either way. See
+  [Voice support](#voice-support-optional) for setup.
 
 ## Configuration reference (`.env`)
 
@@ -307,6 +309,7 @@ changes.
 | `SPEECH_RECOGNITION_LANGUAGE` | Speech-to-text locale | `en-US` |
 | `SPEECH_AAD_SCOPE` | Token scope for keyless Speech auth | `https://cognitiveservices.azure.com/.default` |
 | `VOICE_WS_PORT` | Port the agent serves the voice WebSocket on | `8089` |
+| `LOCAL_RESPONSES_URL` | In-container Responses URL the voice pipeline calls so voice & text share one conversation | `http://localhost:8088/responses` |
 
 The web chat backend also honors `PORT` and `AGENT_MODEL`
 (see [webchat/server.js](webchat/server.js)). The validator honors `PORT`
@@ -406,14 +409,21 @@ button to speak, release to send. Toggle voice mode with the 🎙️ button in t
 ### How it works
 
 Voice uses the **Foundry-native `invocations_ws` WebSocket protocol** (preview) rather than the
-text Responses API. The agent container co-hosts a small WebSocket pipeline
-([voice_pipeline.py](voice_pipeline.py)) next to the Responses server, sharing the **same** in-process
-agent (so all tools, validation and instructions are identical for spoken and typed turns):
+text Responses API for transport. The agent container co-hosts a small WebSocket pipeline
+([voice_pipeline.py](voice_pipeline.py)) next to the Responses server. The WebSocket carries only the
+real-time audio + control frames; to actually run a turn, the pipeline calls the **same local
+`/responses` endpoint** the typed chat uses (`http://localhost:8088/responses`, in-process), so spoken
+and typed turns share identical tools, validation, instructions **and conversation history**:
 
 ```
-microphone (16 kHz PCM)  →  Azure Speech STT  →  the agent  →  control frames + Azure Speech TTS
+microphone (16 kHz PCM)  →  Azure Speech STT  →  POST /responses (shared history)  →  control frames + Azure Speech TTS
 ```
 
+- **Voice and text share one conversation.** Both protocols chain on the same
+  `previous_response_id`: the web chat relay injects the current id before each voice turn and stores
+  the new id the turn returns, in the **same per-session map** typed turns use. So you can say “create
+  3 cubes” by voice, then type “add a sphere on the middle one,” and the agent remembers the cubes
+  (and vice-versa). `/reset` clears the shared history for both.
 - The agent's reply is streamed back as the **same event shapes** the browser already handles for
   typed turns (`tool` / `delta` / `done`), so spoken requests build the scene, render galleries and
   surface validation retries exactly like typed ones.
@@ -425,6 +435,10 @@ microphone (16 kHz PCM)  →  Azure Speech STT  →  the agent  →  control fra
   relays the browser's voice socket to the upstream endpoint at `/api/voice` and injects the Foundry
   bearer token for the remote target. Audio never touches Azure identity in the browser.
 - **Barge-in:** starting to talk while the agent is speaking cancels playback and listens.
+
+> The voice WebSocket (port 8089) is still required — it's the transport for streaming microphone
+> audio in and synthesized speech out. The internal `/responses` call only reuses the conversation
+> store; it never carries audio.
 
 Browser support: Chrome, Edge or Safari (microphone capture + Web Audio). The 🎙️ toggle is
 disabled automatically if the browser or the server isn't voice-capable.

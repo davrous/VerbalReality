@@ -557,11 +557,33 @@ voiceWss.on("connection", async (client, req) => {
   const pending = [];
   let upstreamOpen = false;
 
+  // Shared conversation key: voice and typed turns chain on the SAME previous_response_id
+  // (stored in `sessions`), so they form one cumulative conversation. The relay injects the
+  // current id before each voice turn and captures the new id from the "done" frame.
+  const sKey = sessionKey(sessionId, target);
+
+  const sendUpstream = (frame) => {
+    if (upstreamOpen && upstream.readyState === WebSocket.OPEN) upstream.send(frame);
+    else pending.push(frame);
+  };
+
   upstream.on("open", () => {
     upstreamOpen = true;
     for (const frame of pending.splice(0)) upstream.send(frame);
   });
   upstream.on("message", (data, isBinary) => {
+    // Capture the new response id from the container's "done" frame so the NEXT turn
+    // (voice OR typed) continues the same conversation.
+    if (!isBinary) {
+      try {
+        const evt = JSON.parse(data.toString());
+        if (evt && evt.type === "done" && evt.response_id) {
+          sessions.set(sKey, evt.response_id);
+        }
+      } catch (_) {
+        /* not JSON; ignore */
+      }
+    }
     if (client.readyState === WebSocket.OPEN) {
       client.send(data, { binary: isBinary });
     }
@@ -573,9 +595,24 @@ voiceWss.on("connection", async (client, req) => {
   });
 
   client.on("message", (data, isBinary) => {
-    const frame = isBinary ? data : data.toString();
-    if (upstreamOpen && upstream.readyState === WebSocket.OPEN) upstream.send(frame);
-    else pending.push(frame);
+    if (isBinary) {
+      sendUpstream(data);
+      return;
+    }
+    const text = data.toString();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch (_) {
+      /* not JSON */
+    }
+    // Before a turn runs, hand the container the shared previous_response_id so the voice
+    // turn chains onto whatever the typed chat (or a prior voice turn) last produced.
+    if (parsed && parsed.type === "commit") {
+      const prev = sessions.get(sKey) || null;
+      sendUpstream(JSON.stringify({ type: "context", previous_response_id: prev }));
+    }
+    sendUpstream(text);
   });
   client.on("close", () => {
     if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {

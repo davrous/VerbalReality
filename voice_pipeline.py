@@ -93,6 +93,17 @@ SPEECH_VOICE_NAME = os.environ.get("SPEECH_VOICE_NAME", "en-US-AvaMultilingualNe
 SPEECH_RECOGNITION_LANGUAGE = os.environ.get("SPEECH_RECOGNITION_LANGUAGE", "en-US")
 SPEECH_AAD_SCOPE = os.environ.get("SPEECH_AAD_SCOPE", "https://cognitiveservices.azure.com/.default")
 
+# Voice turns run through the SAME local OpenAI Responses endpoint that the typed chat
+# uses, so both protocols chain on a shared `previous_response_id` and therefore share
+# ONE conversation history. The webchat relay injects the current id before each voice
+# turn and stores the new id when the turn completes (see webchat/server.js).
+SERVER_PORT = int(os.environ.get("PORT", "8088"))
+LOCAL_RESPONSES_URL = os.environ.get(
+    "LOCAL_RESPONSES_URL", f"http://localhost:{SERVER_PORT}/responses"
+)
+# Mirror the value the webchat backend sends for typed turns so behaviour is identical.
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "gpt-4.1")
+
 
 def _is_hosted() -> bool:
     """True when running inside a managed-identity environment (Foundry / Azure)."""
@@ -160,6 +171,25 @@ def strip_fenced_blocks(text: str | None) -> str:
     if not text:
         return ""
     return _FENCE_RE.sub("", text).strip()
+
+
+def _extract_responses_text(response: Any) -> str:
+    """Pull the assistant text out of a Responses API `response` object (any known shape)."""
+    if not isinstance(response, dict):
+        return ""
+    if isinstance(response.get("output_text"), str) and response["output_text"]:
+        return response["output_text"]
+    parts: list[str] = []
+    for item in response.get("output") or []:
+        for c in (item or {}).get("content") or []:
+            if not isinstance(c, dict):
+                continue
+            t = c.get("text")
+            if isinstance(t, str):
+                parts.append(t)
+            elif isinstance(t, dict) and isinstance(t.get("value"), str):
+                parts.append(t["value"])
+    return "\n".join(parts).strip()
 
 
 def _extract_tool_names(update: Any) -> list[str]:
@@ -231,12 +261,12 @@ class VoiceSession:
         self._recognized_parts: list[str] = []
         self._capturing = False
 
-        # Agent conversation continuity across voice turns.
-        try:
-            self._agent_session = agent.create_session()
-        except Exception:  # noqa: BLE001 - fall back to stateless turns if unavailable
-            logger.warning("voice: agent.create_session() failed; turns will be stateless", exc_info=True)
-            self._agent_session = None
+        # Conversation continuity is SHARED with the typed chat: every voice turn runs
+        # through the same local /responses endpoint and chains on previous_response_id,
+        # which the webchat relay keeps in sync with typed turns (it sends the current id
+        # in a {"type":"context"} frame before each turn, and stores the new id from the
+        # {"type":"done"} frame this session returns).
+        self._previous_response_id: str | None = None
 
         # Barge-in flag: set while we are streaming TTS so a new utterance can stop it.
         self._cancel_speech = asyncio.Event()
@@ -285,7 +315,15 @@ class VoiceSession:
         mtype = (message or {}).get("type")
         if mtype == "start":
             await self._start_capture()
+        elif mtype == "context":
+            # Sent by the webchat relay before a turn: the current shared response id, so
+            # the voice turn continues whatever the typed chat (or a prior voice turn) last
+            # produced.
+            self._previous_response_id = (message or {}).get("previous_response_id") or None
         elif mtype == "commit":
+            rid = (message or {}).get("previous_response_id")
+            if rid:
+                self._previous_response_id = rid
             await self._commit_and_run()
         elif mtype == "cancel":
             await self._barge_in()
@@ -345,27 +383,81 @@ class VoiceSession:
 
     # --- agent turn ----------------------------------------------------------------
     async def _run_turn(self, transcript: str) -> None:
+        # Drive the turn through the shared local /responses store (the SAME endpoint the
+        # typed chat uses) so voice and typed turns are ONE conversation. Stream the SSE
+        # and translate it to the same WS frames the browser already handles for typed
+        # turns, then echo the new response id so the relay can keep the shared chain.
+        import httpx  # noqa: PLC0415
+
         reply = ""
         seen_tools: set[str] = set()
+        new_response_id: str | None = None
+        errored = False
+
+        body: dict = {"model": AGENT_MODEL, "input": transcript, "stream": True}
+        if self._previous_response_id:
+            body["previous_response_id"] = self._previous_response_id
+
         try:
-            stream = self._agent.run(transcript, stream=True, session=self._agent_session)
-            # ResponseStream is itself async-iterable; `.updates` is the accumulated list,
-            # so we iterate the stream directly to receive updates as they arrive.
-            async for update in stream:
-                for name in _extract_tool_names(update):
-                    if name not in seen_tools:
-                        seen_tools.add(name)
-                        await self._send_text({"type": "tool", "name": name})
-                delta = getattr(update, "text", None)
-                if delta:
-                    reply += delta
-                    await self._send_text({"type": "delta", "text": delta})
+            timeout = httpx.Timeout(300.0, connect=10.0)
+            async with httpx.AsyncClient(timeout=timeout) as http:
+                async with http.stream(
+                    "POST",
+                    LOCAL_RESPONSES_URL,
+                    json=body,
+                    headers={"Accept": "text/event-stream"},
+                ) as resp:
+                    if resp.status_code >= 400:
+                        raw = (await resp.aread())[:300]
+                        raise RuntimeError(f"responses {resp.status_code}: {raw!r}")
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if not data or data == "[DONE]":
+                            continue
+                        try:
+                            evt = json.loads(data)
+                        except ValueError:
+                            continue
+                        etype = evt.get("type", "")
+                        r = evt.get("response")
+                        if isinstance(r, dict) and r.get("id"):
+                            new_response_id = r["id"]
+                        if etype.endswith("output_text.delta") and isinstance(evt.get("delta"), str):
+                            reply += evt["delta"]
+                            await self._send_text({"type": "delta", "text": evt["delta"]})
+                        elif etype == "response.output_item.done":
+                            item = evt.get("item") or {}
+                            if item.get("type") == "function_call" and item.get("name"):
+                                key = item.get("id") or item.get("call_id") or item["name"]
+                                if key not in seen_tools:
+                                    seen_tools.add(key)
+                                    await self._send_text({"type": "tool", "name": item["name"]})
+                        elif etype in ("response.completed", "response.incomplete"):
+                            txt = _extract_responses_text(r)
+                            if txt:
+                                reply = txt
+                        elif etype in ("response.failed", "error"):
+                            msg = None
+                            if isinstance(r, dict):
+                                msg = (r.get("error") or {}).get("message")
+                            msg = msg or evt.get("message") or "Agent reported a failure."
+                            await self._send_text({"type": "error", "error": msg})
+                            errored = True
         except Exception as err:  # noqa: BLE001
             logger.exception("voice: agent turn failed")
             await self._send_text({"type": "error", "error": str(err) or "Agent error."})
             return
 
-        await self._send_text({"type": "done", "reply": reply})
+        if errored:
+            return
+
+        if new_response_id:
+            self._previous_response_id = new_response_id
+
+        # Echo the new response id so the webchat relay keeps the shared chain in sync.
+        await self._send_text({"type": "done", "reply": reply, "response_id": new_response_id})
 
         # Speak only the prose — never the code that the browser is about to execute.
         prose = strip_fenced_blocks(reply)
