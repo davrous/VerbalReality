@@ -79,7 +79,7 @@ flowchart LR
 
     subgraph webchat["Web chat backend — webchat/server.js"]
         proxy["Express proxy<br/>/api/chat (SSE)<br/>session → previous_response_id"]
-        voicerelay["/api/voice<br/>WebSocket relay<br/>(adds bearer token)"]
+        voicerelay["/api/voice<br/>WebSocket relay<br/>adds bearer token"]
     end
 
     subgraph agent["Hosted agent — agent.py"]
@@ -109,7 +109,7 @@ flowchart LR
     canvas --> scenefit
     chat --> activity
     voice -->|hold V / VR B — PCM audio + control| voicerelay
-    voicerelay -->|invocations_ws (bearer token)| voicews
+    voicerelay -->|invocations_ws + bearer token| voicews
     voicews --> speech
     voicews -->|shares the same agent| host
     voicews -->|tool / delta / done + spoken prose audio| voicerelay
