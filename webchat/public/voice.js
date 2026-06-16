@@ -28,7 +28,7 @@
 window.VoiceControl = (function () {
   "use strict";
 
-  const SAMPLE_RATE = 16000; // STT input + TTS output rate (must match the server).
+  const SAMPLE_RATE = 24000; // STT input + TTS output rate (must match the server).
 
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
 
@@ -37,6 +37,7 @@ window.VoiceControl = (function () {
     getTarget: () => "local",
     onUserTranscript: () => {},
     onAgentEvent: () => {},
+    onProgress: () => {},
     onStateChange: () => {},
     onStatus: () => {},
   };
@@ -225,6 +226,11 @@ window.VoiceControl = (function () {
     if (type === "speaking_end") {
       speaking = false;
       emitState();
+      return;
+    }
+    if (type === "progress") {
+      // Spoken progress narration: mirror the same text to the in-canvas HUD / status.
+      cfg.onProgress(msg.text || "");
       return;
     }
     // tool / delta / done / error -> drive the shared chat pipeline in app.js.

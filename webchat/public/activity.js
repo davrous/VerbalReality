@@ -53,6 +53,14 @@ window.ActivityIndicators = (function () {
     "Composing a {kw} in 3D space…",
     "Crafting meshes for the {kw}…",
     "Almost there — wiring up the {kw}…",
+    "Laying out the {kw}…",
+    "Snapping the {kw} into place…",
+    "Rendering the {kw}…",
+    "Carving the {kw} from triangles…",
+    "Lighting the {kw} just right…",
+    "Breathing life into the {kw}…",
+    "Tweaking the {kw} a little more…",
+    "Stitching the {kw} together…",
   ];
 
   const STOPWORDS = new Set([
@@ -625,5 +633,23 @@ window.ActivityIndicators = (function () {
     return tpl.replace("{kw}", keyword);
   }
 
-  return { attach, detach, start, stop, notifyTool };
+  // Show an explicit progress line pushed from outside (e.g. the agent narrating its work
+  // aloud over voice). Reuses the same wait panel + bouncer so it looks consistent, and
+  // resets the heartbeat so the auto "still working…" messages don't double up on top of it.
+  function showProgress(text) {
+    if (!scene || !text) return;
+    if (!active) {
+      active = true;
+      if (cube) cube.isVisible = true;
+    }
+    showWaitMessage(text);
+    spawnBouncer();
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = setInterval(() => {
+      showWaitMessage(pickMessage());
+      spawnBouncer();
+    }, HEARTBEAT_MS);
+  }
+
+  return { attach, detach, start, stop, notifyTool, showProgress };
 })();

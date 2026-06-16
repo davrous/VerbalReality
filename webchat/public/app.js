@@ -785,9 +785,14 @@
   // ---------------------------------------------------------------------------
   const voiceToggle = document.getElementById("voice-toggle");
   let voiceCtx = null;
+  // True once the turn's {type:"done"} arrived. The agent may still speak a short closing
+  // line afterwards (sent as a late {type:"progress"} frame); that audio must NOT bring the
+  // spinner or canvas waiting HUD back to life after they were cleared.
+  let voiceTurnFinished = false;
 
   function voiceBeginTurn() {
     if (voiceCtx) return;
+    voiceTurnFinished = false;
     voiceCtx = makeTurnContext({ runCode: true, message: "(voice request)" });
     setStatus("busy");
     if (window.ActivityIndicators) window.ActivityIndicators.start("voice request");
@@ -826,11 +831,22 @@
         if (evt.type === "done") {
           finalizeTurn(voiceCtx);
           voiceEndTurn();
+          voiceTurnFinished = true;
         } else if (evt.type === "error") {
           if (window.ActivityIndicators) window.ActivityIndicators.stop();
           setStatus("error");
           voiceEndTurn();
+          voiceTurnFinished = true;
         }
+      },
+      onProgress: (text) => {
+        // The agent is narrating its work aloud — mirror the SAME text into the live
+        // canvas HUD and the status pill so the visual matches what's being spoken.
+        // BUT once the turn is done, a closing line ("All set…") still streams as audio;
+        // don't let it resurrect the spinner / canvas HUD that 'done' already cleared.
+        if (!text || voiceTurnFinished || !voiceCtx) return;
+        if (window.ActivityIndicators) window.ActivityIndicators.showProgress(text);
+        setActivity("\uD83D\uDD0A " + text);
       },
       onStateChange: updateVoiceUI,
       onStatus: (msg) => {

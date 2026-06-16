@@ -51,7 +51,14 @@ environment_variables:
   # identity the "Cognitive Services User" (or "Cognitive Services Speech User") role on it.
   - name: SPEECH_RESOURCE_ID
     value: "{{SPEECH_RESOURCE_ID}}"
+  # HD neural voice for a more natural reply. `…MultilingualNeuralHD` voices are the HD tier
+  # available in North Central US. The marquee DragonHD voices are NOT in NCUS; if you deploy
+  # the Speech resource in a DragonHD region (SEA/IN/SW/WE/EUS/EUS2/WUS2) you can set
+  # SPEECH_VOICE_NAME to e.g. "en-US-Ava:DragonHDLatestNeural". Unsupported voices fall back
+  # to SPEECH_VOICE_FALLBACK so audio is never lost.
   - name: SPEECH_VOICE_NAME
+    value: "en-US-NovaMultilingualNeuralHD"
+  - name: SPEECH_VOICE_FALLBACK
     value: "en-US-AvaMultilingualNeural"
   - name: VOICE_WS_PORT
     value: "8089"
