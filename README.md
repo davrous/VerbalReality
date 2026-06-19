@@ -160,10 +160,13 @@ sequenceDiagram
 - Azure CLI logged in for local dev: `az login` (the agent uses `DefaultAzureCredential`)
 - A Microsoft Foundry project endpoint + a deployed model
 - **For voice (optional):** an **Azure AI Services / Speech** resource and a microphone-capable
-  browser (Chrome, Edge or Safari). The `invocations_ws` voice protocol is currently in **preview and
-  available only in the North Central US region**, so the hosted agent must be deployed there for
-  remote voice. See [Voice support](#voice-support-optional) below for the required configuration and
-  the **agent-identity role assignment**.
+  browser (Chrome, Edge or Safari). You can **reuse the AI Services resource behind your Foundry
+  project** (it already includes Speech). Auth is **keyless (Entra ID)** by default, which needs the
+  **Cognitive Services User** role on that resource — your `az login` identity locally, and the
+  **agent's Entra identity** when deployed. The `invocations_ws` voice protocol is currently in
+  **preview and available only in the North Central US region**, so the hosted agent must be deployed
+  there for remote voice. See [Voice support](#voice-support-optional) below for the exact variables,
+  the commands to **find their values**, and the **agent-identity role assignment**.
 
 ## Setup
 
@@ -491,3 +494,39 @@ disabled automatically if the browser or the server isn't voice-capable.
 
 When configured, `GET /api/config` reports `voiceLocalAvailable` / `voiceRemoteAvailable`, and the
 agent logs `Voice path ENABLED — serving voice WebSocket on port 8089.` on startup.
+
+### Find the Speech values
+
+You can reuse the **same AI Services resource** that backs your Foundry project — it is multi-service,
+so Speech is already included. The host part of your `PROJECT_ENDPOINT`
+(`https://<name>.services.ai.azure.com/...`) is that resource's `<name>`. Use the Azure CLI to read
+the exact values (or find them in the [Azure portal](https://portal.azure.com) on the resource's
+**Overview** / **Keys and Endpoint** / **Access control (IAM)** blades):
+
+```bash
+# 1. SPEECH_REGION + SPEECH_RESOURCE_ID — location and full ARM id of the account.
+#    Replace <name> with your AI Services / Speech resource (e.g. the host in PROJECT_ENDPOINT).
+az cognitiveservices account list \
+  --query "[?name=='<name>'].{name:name, region:location, id:id, kind:kind}" -o table
+
+# 2. Is key-based auth disabled? If 'true', you MUST use keyless (Entra) auth — skip SPEECH_KEY.
+az cognitiveservices account show --name <name> --resource-group <rg> \
+  --query "properties.disableLocalAuth" -o tsv
+
+# 3. (Key auth only — when disableLocalAuth is false) read the subscription key.
+az cognitiveservices account keys list --name <name> --resource-group <rg> \
+  --query key1 -o tsv
+
+# 4. (Keyless auth) confirm YOUR identity holds the role on the resource for local dev.
+ME=$(az ad signed-in-user show --query id -o tsv)
+RID=$(az cognitiveservices account show --name <name> --resource-group <rg> --query id -o tsv)
+az role assignment list --assignee "$ME" --scope "$RID" --include-inherited \
+  --query "[].roleDefinitionName" -o tsv
+# If "Cognitive Services User" (or "Cognitive Services Speech User") is missing, grant it:
+az role assignment create --assignee "$ME" --role "Cognitive Services User" --scope "$RID"
+```
+
+Map the output to `.env`: `region` → `SPEECH_REGION`, `id` → `SPEECH_RESOURCE_ID`, and `key1` →
+`SPEECH_KEY` (only if you opted for key auth). Most Foundry AI Services accounts have
+`disableLocalAuth=true`, in which case keyless auth (`SPEECH_RESOURCE_ID` + the role from step 4) is
+the only option.
