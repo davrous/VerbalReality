@@ -653,11 +653,15 @@ Rules for the code you generate:
     so they are only registered once. Use a flag on `scene`, e.g.
     `if (!scene._myMeshSpin) { scene._myMeshSpin = scene.onBeforeRenderObservable.add(() => { mesh.rotate(BABYLON.Axis.Y, 0.01, BABYLON.Space.LOCAL); }); }`.
     This prevents duplicate observers that make a mesh spin faster each time.
-  * The page AUTO-SCALES whatever you add each turn to a consistent canonical size and
-    frames the camera on it, so you do NOT need to worry about absolute units or making
-    things fit the view. Focus on correct RELATIVE proportions between objects (a door
-    smaller than its wall, a wheel smaller than its car). Build near the origin; the
-    page rests new content on the ground and centers the first object for you.
+  * The page can run in two viewport modes. In the default AUTOMATIC mode it AUTO-SCALES
+    whatever you add each turn to a consistent canonical size and frames the camera on it,
+    so you do NOT need to worry about absolute units or making things fit the view. Focus
+    on correct RELATIVE proportions between objects (a door smaller than its wall, a wheel
+    smaller than its car). Build near the origin; the page rests new content on the ground
+    and centers the first object for you. If a turn is prefixed with a `[scene mode]` note
+    saying manual mode is ON, that auto-scaling and camera framing are DISABLED for that
+    turn: follow the note and use explicit, real world-unit sizes and positions (they are
+    used verbatim, and the camera will not move).
   * After this normalization, every object already in the scene (built or loaded from the
     library) is about 5 world units across its largest dimension, sits ON the ground
     (its base near y = 0), and is positioned near the origin. So when you MOVE, PLACE or

@@ -25,6 +25,14 @@
 
   let fitCounter = 0;
 
+  // Whether the page should auto-scale + auto-frame new content. In "default" (manual)
+  // mode — and while in VR — the user wants the agent's raw world-unit coordinates and a
+  // camera that never jumps, so SceneFit becomes a no-op. window.SceneControls is defined
+  // by app.js; default to automatic if it hasn't loaded yet.
+  function isAutomatic() {
+    return !window.SceneControls || window.SceneControls.isAutomatic();
+  }
+
   // Meshes the app creates for UI/feedback (activity cube, HUD, and our own fit nodes).
   // They must never be measured or rescaled as if they were user content.
   function isHelper(node) {
@@ -283,6 +291,9 @@
   // Called after a turn's generated code has run. Normalizes the subject meshes created
   // this turn and frames the camera on them. Grounds are left untouched.
   function fitNewContent(scene, camera, beforeSet) {
+    // Manual / VR mode: keep the agent's exact world-unit sizes and positions, and leave
+    // the camera wherever the user put it.
+    if (!isAutomatic()) return;
     const { subjects } = getNewRoots(scene, beforeSet);
     if (!subjects.length) return; // nothing measurable added (e.g. only a ground / animation)
 
@@ -315,6 +326,16 @@
     // in plain world units rather than multiplied by a hidden parent scale.
     if (root.parent) root.setParent(null);
     root.computeWorldMatrix(true);
+
+    // Manual / VR mode: keep the model at its natural imported size (still honoring an
+    // explicit userScale) without re-centering, grounding, or moving the camera.
+    if (!isAutomatic()) {
+      if (scale !== 1) {
+        root.scaling = root.scaling.scale(scale);
+        root.computeWorldMatrix(true);
+      }
+      return;
+    }
     const bounds = root.getHierarchyBoundingVectors(true);
     // Fold the requested user scale into the target dimension.
     const sizeX = bounds.max.x - bounds.min.x;

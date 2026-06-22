@@ -651,5 +651,11 @@ window.ActivityIndicators = (function () {
     }, HEARTBEAT_MS);
   }
 
-  return { attach, detach, start, stop, notifyTool, showProgress };
+  // Re-point the HUD at a new camera without rebuilding the indicator cluster (used when
+  // app.js swaps the orbit camera for the walk camera and vice-versa).
+  function setCamera(newCamera) {
+    if (newCamera) camera = newCamera;
+  }
+
+  return { attach, detach, start, stop, notifyTool, showProgress, setCamera };
 })();

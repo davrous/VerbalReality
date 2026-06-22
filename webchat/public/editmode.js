@@ -278,7 +278,22 @@ window.EditMode = (function () {
     if (!scene || !scene.createDefaultXRExperienceAsync) return;
     try {
       xrHelper = await scene.createDefaultXRExperienceAsync({});
-      if (!xrHelper || !xrHelper.input) return;
+      if (!xrHelper) return;
+      // Entering VR forces the page into default (manual) mode so SceneFit never rescales
+      // or re-frames while immersed — the user wants to speak objects into the space in
+      // front of them without the camera jumping. The previous mode is restored on exit.
+      if (xrHelper.baseExperience && xrHelper.baseExperience.onStateChangedObservable) {
+        xrHelper.baseExperience.onStateChangedObservable.add((state) => {
+          if (!window.SceneControls) return;
+          const XRState = BABYLON.WebXRState;
+          if (state === XRState.ENTERING_XR || state === XRState.IN_XR) {
+            if (window.SceneControls.enterVRMode) window.SceneControls.enterVRMode();
+          } else if (state === XRState.NOT_IN_XR) {
+            if (window.SceneControls.exitVRMode) window.SceneControls.exitVRMode();
+          }
+        });
+      }
+      if (!xrHelper.input) return;
       xrHelper.input.controllers.forEach(wireXRController);
       xrHelper.input.onControllerAddedObservable.add(wireXRController);
     } catch (err) {
@@ -306,11 +321,18 @@ window.EditMode = (function () {
     initXR();
   }
 
+  // Update the cached camera reference when app.js swaps cameras (orbit <-> walk). The
+  // gizmos pick against scene.activeCamera, so no rebuild is needed here.
+  function setCamera(newCamera) {
+    if (newCamera) camera = newCamera;
+  }
+
   return {
     attach: attach,
     enable: enable,
     disable: disable,
     isEnabled: isEnabled,
     consumePendingEdits: consumePendingEdits,
+    setCamera: setCamera,
   };
 })();

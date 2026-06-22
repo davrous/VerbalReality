@@ -14,6 +14,17 @@
   const canvas = document.getElementById("renderCanvas");
   let engine, scene, camera;
 
+  // Viewport mode + camera type (exposed below as window.SceneControls).
+  //   sceneMode === "automatic": SceneFit normalizes/grounds each turn's new content and
+  //                              frames the orbit camera on it (the original behavior).
+  //   sceneMode === "default":   nothing is rescaled and the camera never auto-moves — the
+  //                              agent's raw world-unit coordinates are used as-is. This is
+  //                              also the mode used inside VR.
+  //   cameraType (default mode only): "arcrotate" = orbit camera, "fps" = free-fly walk.
+  let sceneMode = "automatic";
+  let cameraType = "arcrotate";
+  let prevModeBeforeVR = null;
+
   // ---------------------------------------------------------------------------
   // Havok physics — initialized once and pre-enabled on every (re)built scene so
   // that agent snippets can add PhysicsAggregate / PhysicsBody synchronously. The
@@ -62,20 +73,44 @@
     canvas.addEventListener(type, (e) => e.preventDefault(), { passive: false })
   );
 
+  // Build the active camera for the current `cameraType`. ArcRotate = the classic orbit
+  // camera (used in automatic mode and as the default-mode orbit option); FPS = a free-fly
+  // BABYLON.UniversalCamera (WASD + arrow keys + mouse-look) for walking through a scene
+  // built in default mode.
+  function createCamera() {
+    let cam;
+    if (cameraType === "fps") {
+      cam = new BABYLON.UniversalCamera("camera", new BABYLON.Vector3(0, 4, -12), scene);
+      cam.setTarget(BABYLON.Vector3.Zero());
+      cam.speed = 0.4;
+      cam.inertia = 0.7;
+      cam.angularSensibility = 800;
+      cam.minZ = 0.05;
+      // WASD movement in addition to the default arrow keys.
+      cam.keysUp = [87, 38]; // W / up
+      cam.keysDown = [83, 40]; // S / down
+      cam.keysLeft = [65, 37]; // A / left
+      cam.keysRight = [68, 39]; // D / right
+    } else {
+      cam = new BABYLON.ArcRotateCamera(
+        "camera",
+        -Math.PI / 2,
+        Math.PI / 2.5,
+        10,
+        BABYLON.Vector3.Zero(),
+        scene
+      );
+      cam.wheelPrecision = 30;
+    }
+    return cam;
+  }
+
   function buildScene() {
     scene = new BABYLON.Scene(engine);
     scene.clearColor = new BABYLON.Color4(0.043, 0.063, 0.125, 1);
 
-    camera = new BABYLON.ArcRotateCamera(
-      "camera",
-      -Math.PI / 2,
-      Math.PI / 2.5,
-      10,
-      BABYLON.Vector3.Zero(),
-      scene
-    );
+    camera = createCamera();
     camera.attachControl(canvas, true);
-    camera.wheelPrecision = 30;
 
     new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
 
@@ -100,6 +135,140 @@
 
   engine.runRenderLoop(() => scene.render());
   window.addEventListener("resize", () => engine.resize());
+
+  // ---------------------------------------------------------------------------
+  // Scene mode + camera type — switching, UI wiring, and the agent context note.
+  // Exposed as window.SceneControls so scenefit.js (auto-scale toggle), voice.js (agent
+  // note for spoken turns) and editmode.js (force default mode in VR) can read/drive it.
+  // ---------------------------------------------------------------------------
+
+  // Dispose the current camera and rebuild it for the current `cameraType`, re-pointing
+  // the helpers that cache a camera reference (HUD + edit gizmos) at the new one.
+  function rebuildCamera() {
+    if (!scene || !engine) return;
+    const old = camera;
+    if (old) {
+      try {
+        old.detachControl(canvas);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    camera = createCamera();
+    camera.attachControl(canvas, true);
+    scene.activeCamera = camera;
+    if (old) {
+      try {
+        old.dispose();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    if (window.ActivityIndicators && window.ActivityIndicators.setCamera) {
+      window.ActivityIndicators.setCamera(camera);
+    }
+    if (window.EditMode && window.EditMode.setCamera) {
+      window.EditMode.setCamera(camera);
+    }
+  }
+
+  // The silent note prepended to a turn's message when in default mode, so the agent knows
+  // its coordinates are used verbatim (no auto-scale, no camera framing). Returns "" in
+  // automatic mode.
+  function agentSceneNote() {
+    if (sceneMode !== "default") return "";
+    return (
+      "[scene mode] Manual mode is ON: the page will NOT resize your objects and will NOT " +
+      "move the camera this turn. Build using explicit, real Babylon.js world-unit sizes " +
+      "and positions (these are used verbatim). Place new content near the origin and in " +
+      "front of the camera \u2014 keep x and z roughly between -8 and 8 and y >= 0 so it rests " +
+      "on the ground \u2014 and use sensible absolute sizes (e.g. a box of size 1-3 units) with " +
+      "correct relative proportions. Do not assume any normalization to ~5 units; the camera " +
+      "stays where the user placed it."
+    );
+  }
+
+  function updateControlsUI() {
+    const modeBtns = document.querySelectorAll("#mode-seg .vc-btn");
+    modeBtns.forEach((b) => {
+      const on = b.getAttribute("data-mode") === sceneMode;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    const camBtns = document.querySelectorAll("#camera-seg .vc-btn");
+    camBtns.forEach((b) => {
+      const on = b.getAttribute("data-cam") === cameraType;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    // The camera-type switch only applies in default mode.
+    const camRow = document.getElementById("camera-row");
+    if (camRow) camRow.classList.toggle("vc-disabled", sceneMode !== "default");
+  }
+
+  function setCameraType(next) {
+    const t = next === "fps" ? "fps" : "arcrotate";
+    if (t === cameraType && camera) {
+      updateControlsUI();
+      return;
+    }
+    cameraType = t;
+    rebuildCamera();
+    updateControlsUI();
+  }
+
+  function setSceneMode(next) {
+    const m = next === "default" ? "default" : "automatic";
+    if (m === sceneMode) {
+      updateControlsUI();
+      return;
+    }
+    sceneMode = m;
+    // Automatic mode always uses the orbit camera (its framing logic is ArcRotate-only).
+    if (m === "automatic" && cameraType !== "arcrotate") {
+      setCameraType("arcrotate"); // rebuilds + refreshes the UI
+    } else {
+      updateControlsUI();
+    }
+  }
+
+  // VR entry/exit (driven by editmode.js). While immersed we force default mode so
+  // SceneFit never rescales/reframes; WebXR swaps in its own camera, so we do NOT rebuild
+  // ours here. On exit we restore whatever mode was active before.
+  function enterVRMode() {
+    if (prevModeBeforeVR === null) prevModeBeforeVR = sceneMode;
+    sceneMode = "default";
+    updateControlsUI();
+  }
+  function exitVRMode() {
+    const restore = prevModeBeforeVR;
+    prevModeBeforeVR = null;
+    if (restore && restore !== sceneMode) setSceneMode(restore);
+    else updateControlsUI();
+  }
+
+  // Wire the on-canvas control panel buttons.
+  document.querySelectorAll("#mode-seg .vc-btn").forEach((b) => {
+    b.addEventListener("click", () => setSceneMode(b.getAttribute("data-mode")));
+  });
+  document.querySelectorAll("#camera-seg .vc-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      if (sceneMode !== "default") return; // camera switch only in default mode
+      setCameraType(b.getAttribute("data-cam"));
+    });
+  });
+  updateControlsUI();
+
+  window.SceneControls = {
+    getMode: () => sceneMode,
+    getCameraType: () => cameraType,
+    isAutomatic: () => sceneMode === "automatic",
+    setMode: setSceneMode,
+    setCameraType: setCameraType,
+    agentNote: agentSceneNote,
+    enterVRMode: enterVRMode,
+    exitVRMode: exitVRMode,
+  };
 
   // ---------------------------------------------------------------------------
   // Resizable chat panel — drag the divider on the chat's left border.
@@ -662,6 +831,12 @@
 
     const ctx = makeTurnContext({ runCode, message });
 
+    // In default (manual) mode, prepend a silent note so the agent uses raw world-unit
+    // coordinates (the page no longer auto-scales/frames). The chat bubble already showed
+    // the user's own text above, so this only affects what the agent receives.
+    const sceneNote = runCode && window.SceneControls ? window.SceneControls.agentNote() : "";
+    const outgoing = sceneNote ? sceneNote + "\n\n" + message : message;
+
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
@@ -669,7 +844,7 @@
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
-        body: JSON.stringify({ message, sessionId, target: agentTarget }),
+        body: JSON.stringify({ message: outgoing, sessionId, target: agentTarget }),
       });
 
       if (!resp.ok || !resp.body) {

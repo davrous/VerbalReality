@@ -440,6 +440,11 @@ class VoiceSession:
         # {"type":"done"} frame this session returns).
         self._previous_response_id: str | None = None
 
+        # Optional per-turn note carried on the {"type":"commit"} frame when the page is in
+        # default (manual) mode, so the spoken request is built with raw world-unit
+        # coordinates (no auto-scale / camera framing). Cleared after each turn.
+        self._pending_scene_note: str = ""
+
         # Barge-in flag: set while we are streaming TTS so a new utterance can stop it.
         self._cancel_speech = asyncio.Event()
         self._speaking = False
@@ -508,6 +513,7 @@ class VoiceSession:
             rid = (message or {}).get("previous_response_id")
             if rid:
                 self._previous_response_id = rid
+            self._pending_scene_note = (message or {}).get("scene_note") or ""
             await self._commit_and_run()
         elif mtype == "cancel":
             await self._barge_in()
@@ -605,7 +611,14 @@ class VoiceSession:
                 self._last_speech_ts = time.monotonic()
                 await self._tts_queue.put(s)
 
-        body: dict = {"model": AGENT_MODEL, "input": transcript, "stream": True}
+        # In default (manual) mode the browser sends a scene note on the commit frame; feed
+        # it to the agent (but NOT to the user transcript/TTS), then clear it for next turn.
+        agent_input = transcript
+        if self._pending_scene_note:
+            agent_input = self._pending_scene_note + "\n\n" + transcript
+        self._pending_scene_note = ""
+
+        body: dict = {"model": AGENT_MODEL, "input": agent_input, "stream": True}
         if self._previous_response_id:
             body["previous_response_id"] = self._previous_response_id
 

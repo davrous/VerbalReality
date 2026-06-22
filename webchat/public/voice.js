@@ -180,8 +180,9 @@ window.VoiceControl = (function () {
     pendingFrames.push(frame);
   }
 
-  function sendControl(type) {
-    send(JSON.stringify({ type }));
+  function sendControl(type, extra) {
+    const frame = extra ? Object.assign({ type: type }, extra) : { type: type };
+    send(JSON.stringify(frame));
   }
 
   function closeSocket() {
@@ -309,7 +310,13 @@ window.VoiceControl = (function () {
     if (!listening) return;
     listening = false;
     stopCapture();
-    sendControl("commit");
+    // In default (manual) mode, carry the same silent agent note typed turns use so the
+    // spoken request is built with raw world-unit coordinates (no auto-scale / framing).
+    const sceneNote =
+      window.SceneControls && window.SceneControls.agentNote
+        ? window.SceneControls.agentNote()
+        : "";
+    sendControl("commit", sceneNote ? { scene_note: sceneNote } : null);
     awaitingReply = true;
     emitState();
   }

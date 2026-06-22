@@ -87,6 +87,85 @@ body.resizing {
   touch-action: none;
 }
 
+/* On-canvas viewport controls (scene mode + camera type), pinned top-left. */
+#viewport-controls {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: rgba(15, 19, 36, 0.72);
+  border: 1px solid #2a3050;
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  user-select: none;
+}
+
+.vc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vc-label {
+  flex: 0 0 50px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #9aa3c8;
+}
+
+/* Segmented two-button switch */
+.vc-seg {
+  display: inline-flex;
+  background: #11152a;
+  border: 1px solid #2a3050;
+  border-radius: 7px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.vc-btn {
+  min-width: 52px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: #c7cdec;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.vc-btn:hover:not(.active) {
+  background: #1b2138;
+  color: #e8ebf5;
+}
+
+.vc-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(90, 107, 216, 0.6);
+}
+
+.vc-btn.active {
+  background: #243a8f;
+  color: #ffffff;
+  box-shadow: 0 0 0 1px #5a6bd8 inset;
+}
+
+/* Camera row is dimmed + non-interactive unless Manual mode is selected. */
+.vc-row.vc-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
 /* Right: chat panel, resizable width */
 #chat-pane {
   flex: 0 0 var(--chat-width);

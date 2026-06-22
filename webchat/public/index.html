@@ -14,6 +14,54 @@
     <div id="app">
       <div id="canvas-pane">
         <canvas id="renderCanvas" touch-action="none"></canvas>
+        <div id="viewport-controls" role="group" aria-label="Viewport controls">
+          <div class="vc-row">
+            <span class="vc-label">Scene</span>
+            <div class="vc-seg" id="mode-seg" role="group" aria-label="Scene mode">
+              <button
+                type="button"
+                class="vc-btn active"
+                data-mode="automatic"
+                aria-pressed="true"
+                title="Automatic — objects are scaled to a consistent size and the camera frames them."
+              >
+                Auto
+              </button>
+              <button
+                type="button"
+                class="vc-btn"
+                data-mode="default"
+                aria-pressed="false"
+                title="Manual — your exact sizes/positions are kept and the camera stays put (used in VR)."
+              >
+                Manual
+              </button>
+            </div>
+          </div>
+          <div class="vc-row vc-disabled" id="camera-row">
+            <span class="vc-label">Camera</span>
+            <div class="vc-seg" id="camera-seg" role="group" aria-label="Camera type">
+              <button
+                type="button"
+                class="vc-btn active"
+                data-cam="arcrotate"
+                aria-pressed="true"
+                title="Orbit camera — drag to rotate around the scene."
+              >
+                Orbit
+              </button>
+              <button
+                type="button"
+                class="vc-btn"
+                data-cam="fps"
+                aria-pressed="false"
+                title="Walk camera — WASD / arrows to move, drag to look around."
+              >
+                Walk
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
       <div id="chat-resizer" role="separator" aria-orientation="vertical" title="Drag to resize chat">
         <span id="chat-resizer-grip"></span>
