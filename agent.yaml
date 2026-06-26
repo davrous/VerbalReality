@@ -30,7 +30,7 @@ environment_variables:
   # service is co-hosted alongside the Python agent (see Dockerfile + start.sh) and
   # listens on localhost:8087, so server-side validation is ENABLED for hosted deploys.
   - name: ENABLE_VALIDATION
-    value: "true"
+    value: "{{ENABLE_VALIDATION}}"
   - name: VALIDATOR_URL
     value: "http://localhost:8087/validate"
   # Capture every failing validate_babylon_code attempt (code + error + prompt) to the
